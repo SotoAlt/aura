@@ -10,3 +10,8 @@ uvicorn
 pillow
 soundfile
 gymnasium
+optax
+chex
+einops
+tqdm
+pyyaml

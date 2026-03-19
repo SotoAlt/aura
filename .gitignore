@@ -6,9 +6,10 @@ __pycache__/
 *.egg
 .python-version
 
-# Data & Models
-data/
+# Data & Models (generated data, not source code)
+/data/
 checkpoints/
+!world_model/data/
 *.npz
 *.pkl
 *.onnx

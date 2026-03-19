@@ -1,0 +1,51 @@
+# AURA world model configurations
+
+aura:
+  # Production config (Colab A100/T4)
+  deter_dim: 1024
+  stoch_dim: 32
+  classes: 32
+  hidden_dim: 512
+  embed_dim: 512
+  action_dim: 3
+  context_dim: 16
+  add_dcontext: true
+  add_context_prior: true
+  add_context_posterior: true
+  free_nats: 1.0
+  unimix: 0.01
+  # Encoder/decoder
+  encoder_channels: [32, 64, 128, 256]
+  decoder_channels: [256, 128, 64, 32]
+  # Training
+  lr: 3.0e-4
+  batch_size: 16
+  seq_length: 50
+  kl_scale: 1.0
+  reward_scale: 1.0
+  grad_clip: 100.0
+
+aura_debug:
+  # Tiny config for CPU testing (fast iteration)
+  deter_dim: 256
+  stoch_dim: 16
+  classes: 16
+  hidden_dim: 128
+  embed_dim: 256
+  action_dim: 3
+  context_dim: 16
+  add_dcontext: true
+  add_context_prior: true
+  add_context_posterior: true
+  free_nats: 1.0
+  unimix: 0.01
+  # Encoder/decoder (smaller)
+  encoder_channels: [16, 32, 64, 128]
+  decoder_channels: [128, 64, 32, 16]
+  # Training
+  lr: 1.0e-3
+  batch_size: 4
+  seq_length: 10
+  kl_scale: 1.0
+  reward_scale: 1.0
+  grad_clip: 100.0

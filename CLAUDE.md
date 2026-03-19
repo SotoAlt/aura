@@ -8,7 +8,7 @@ AURA is an audio-conditioned world model that generates and simulates alien corr
 - **Repo**: github.com/SotoAlt/aura (private)
 - **Domain**: waweapps.win
 - **Deadline**: April 14, 2026 (demo) / April 30, 2026 (competition)
-- **Status**: Scaffolding complete, entering P0 (Foundation)
+- **Status**: P0 (Foundation) — in progress
 
 ## Architecture
 
@@ -23,7 +23,7 @@ Audio Input → FFT/Feature Extraction → 16-float context vector (c_t)
 ```
 
 Three systems:
-1. **World Model** (Python/JAX): Vendored DreamerV3 fork with cRSSM audio conditioning
+1. **World Model** (Python/JAX): Lightweight cRSSM in plain JAX (NOT vendoring full DreamerV3 framework — its dep chain conflicts with modern Python/numpy)
 2. **Browser Client** (Three.js/Vite): Renders decoded frames, captures audio via Web Audio API
 3. **Inference Server** (FastAPI): Bridges world model to browser via WebSocket
 
@@ -31,7 +31,7 @@ Three systems:
 
 | Layer | Technology |
 |-------|-----------|
-| World Model | DreamerV3 fork (JAX) — cRSSM with 16-float audio context |
+| World Model | Lightweight cRSSM (plain JAX + optax) — 16-float audio context |
 | Training | Google Colab (A100/T4) |
 | Data Generation | Custom Python corridor sim (NumPy) |
 | Audio Analysis | librosa (training), Web Audio API (inference) |
@@ -43,21 +43,21 @@ Three systems:
 
 ```
 aura/
-  world_model/                  Python: DreamerV3 fork + training pipeline
-    dreamer/                    Vendored DreamerV3 (JAX) — cRSSM modifications
+  world_model/                  Python: cRSSM world model + training pipeline
+    dreamer/                    Plain JAX cRSSM implementation
+      nets.py                   ★ CNN encoder/decoder, MLP, GRU primitives
       rssm.py                   ★ Core: cRSSM with audio context conditioning
-      agent.py                  ★ Modified: audio context flow
-      configs.yaml              AURA-specific training configs
-      main.py                   Training entry point
-    embodied/                   Vendored DreamerV3 framework (mostly unchanged)
+      agent.py                  ★ WorldModel + Trainer (optax)
+      configs.yaml              AURA-specific training configs (aura + aura_debug)
     envs/
-      corridor.py               ★ Gymnasium env: procedural alien corridor
-      audio_env.py              Audio feature injection wrapper
+      corridor.py               ★ Gymnasium env: procedural alien corridor (raycaster)
     audio/
-      features.py               ★ librosa: FFT bands, onset, BPM, spectral centroid
+      features.py               ★ librosa: FFT bands, onset, BPM, spectral centroid → 16 floats
       synthetic.py              Procedural audio generation for training
-    train.py                    Training launcher
-    infer.py                    ★ FastAPI inference server
+    data/
+      generate.py               ★ Episode generator + NPZ dataset loader
+    test_pipeline.py            End-to-end P0 verification
+    infer.py                    ★ FastAPI inference server (P2)
     requirements.txt            Local deps (CPU)
     requirements-colab.txt      Colab deps (GPU)
   client/                       Browser: Three.js + Vite
@@ -84,15 +84,21 @@ aura/
 cd world_model
 source .venv/bin/activate
 
-# Generate small test dataset (local, CPU)
-python -m envs.corridor --episodes 100 --output ../data/test
+# Run P0 pipeline test (verifies everything works end-to-end)
+cd /path/to/aura
+python -m world_model.test_pipeline
 
-# Run inference server (CPU)
-JAX_PLATFORM=cpu python infer.py --checkpoint ../checkpoints/aura-v0.1
+# Generate training data (local, CPU)
+python -m world_model.data.generate --episodes 100 --output data/test
+
+# Run corridor env standalone
+python -m world_model.envs.corridor --episodes 10 --output data/test
+
+# Run inference server (CPU) — P2
+JAX_PLATFORM=cpu python world_model/infer.py --checkpoint checkpoints/aura-v0.1
 
 # Client dev server
-cd client
-npx vite
+cd client && npx vite
 
 # Test JAX installation
 python -c "import jax; print(jax.devices())"
@@ -142,7 +148,7 @@ drive.mount('/content/drive')
 
 | Phase | Status | Goal |
 |-------|--------|------|
-| P0: Foundation | **Current** | Corridor env + audio pipeline + DreamerV3 fork |
+| P0: Foundation | **In Progress** | Corridor env + audio pipeline + lightweight cRSSM (plain JAX) |
 | P1: Training | Pending | Train on Colab, validate audio→world correlation |
 | P2: Browser Demo | Pending | FastAPI inference + Three.js client |
 | P3: Rhythm Mechanic | Deferred | Beat detection, interactive nodes, scoring |
