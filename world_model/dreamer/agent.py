@@ -155,6 +155,19 @@ def imagine_trajectory(params: dict, rssm_cfg: RSSMConfig, init_state: RSSMState
     return decoded.reshape(B, T, 64, 64, 3)
 
 
+def preprocess_batch(batch: dict, cfg: dict) -> dict:
+    """Pre-convert batch arrays for JAX differentiation.
+
+    One-hot encodes actions, casts is_first/reward/image to float32.
+    """
+    batch = {**batch}
+    batch['action'] = jax.nn.one_hot(batch['action'], cfg['action_dim'])
+    batch['is_first'] = batch['is_first'].astype(jnp.float32)
+    batch['reward'] = batch['reward'].astype(jnp.float32)
+    batch['image'] = batch['image'].astype(jnp.float32)
+    return batch
+
+
 class Trainer:
     """Optax-based training loop for the world model."""
 
@@ -183,12 +196,7 @@ class Trainer:
         Returns:
             (new_params, new_opt_state, metrics)
         """
-        # Pre-convert integer arrays so JAX can differentiate
-        batch = {**batch}
-        batch['action'] = jax.nn.one_hot(batch['action'], self.cfg['action_dim'])
-        batch['is_first'] = batch['is_first'].astype(jnp.float32)
-        batch['reward'] = batch['reward'].astype(jnp.float32)
-        batch['image'] = batch['image'].astype(jnp.float32)
+        batch = preprocess_batch(batch, self.cfg)
 
         rssm_cfg = self.rssm_cfg
         cfg = self.cfg

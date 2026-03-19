@@ -13,3 +13,5 @@ einops
 optax
 chex
 tqdm
+pyyaml
+matplotlib

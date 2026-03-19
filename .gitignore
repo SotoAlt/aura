@@ -32,6 +32,12 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Eval output
+eval_output/
+
+# Claude Code
+.claude/
+
 # Logs
 logs/
 *.log

@@ -8,7 +8,7 @@ AURA is an audio-conditioned world model that generates and simulates alien corr
 - **Repo**: github.com/SotoAlt/aura (private)
 - **Domain**: waweapps.win
 - **Deadline**: April 14, 2026 (demo) / April 30, 2026 (competition)
-- **Status**: P0 (Foundation) — in progress
+- **Status**: P1 (Training) — in progress
 
 ## Architecture
 
@@ -49,6 +49,8 @@ aura/
       rssm.py                   ★ Core: cRSSM with audio context conditioning
       agent.py                  ★ WorldModel + Trainer (optax)
       configs.yaml              AURA-specific training configs (aura + aura_debug)
+      checkpoint.py             Save/load model checkpoints (pickle)
+      logging.py                Optional wandb logging helpers
     envs/
       corridor.py               ★ Gymnasium env: procedural alien corridor (raycaster)
     audio/
@@ -57,6 +59,8 @@ aura/
     data/
       generate.py               ★ Episode generator + NPZ dataset loader
     test_pipeline.py            End-to-end P0 verification
+    train.py                    ★ Training script (CPU + Colab GPU)
+    eval.py                     ★ Evaluation: GIFs + audio correlation metrics
     infer.py                    ★ FastAPI inference server (P2)
     requirements.txt            Local deps (CPU)
     requirements-colab.txt      Colab deps (GPU)
@@ -93,6 +97,12 @@ python -m world_model.data.generate --episodes 100 --output data/test
 
 # Run corridor env standalone
 python -m world_model.envs.corridor --episodes 10 --output data/test
+
+# Train (local CPU smoke test)
+python -m world_model.train --config aura_debug --data data/smoke --steps 100 --checkpoint checkpoints/smoke.ckpt --no-wandb
+
+# Evaluate checkpoint
+python -m world_model.eval --checkpoint checkpoints/smoke.ckpt --output eval_output/smoke/
 
 # Run inference server (CPU) — P2
 JAX_PLATFORM=cpu python world_model/infer.py --checkpoint checkpoints/aura-v0.1
@@ -148,8 +158,8 @@ drive.mount('/content/drive')
 
 | Phase | Status | Goal |
 |-------|--------|------|
-| P0: Foundation | **In Progress** | Corridor env + audio pipeline + lightweight cRSSM (plain JAX) |
-| P1: Training | Pending | Train on Colab, validate audio→world correlation |
+| P0: Foundation | **Complete** | Corridor env + audio pipeline + lightweight cRSSM (plain JAX) |
+| P1: Training | **In Progress** | Train on Colab, validate audio→world correlation |
 | P2: Browser Demo | Pending | FastAPI inference + Three.js client |
 | P3: Rhythm Mechanic | Deferred | Beat detection, interactive nodes, scoring |
 | P4: Multiplayer | Deferred | WebSocket server, multi-client sync |

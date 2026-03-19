@@ -110,8 +110,8 @@ class NPZDataset:
             raise FileNotFoundError(f'No episodes found in {data_dir}')
 
     def _load_episode(self, path: Path) -> dict[str, np.ndarray]:
-        data = np.load(path)
-        return {k: data[k] for k in data.files}
+        with np.load(path) as data:
+            return {k: data[k] for k in data.files}
 
     def _sample_sequence(self, episode: dict, rng: np.random.Generator) -> dict:
         """Sample a contiguous sequence from an episode.
