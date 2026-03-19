@@ -189,33 +189,44 @@ class Trainer:
         opt_state = self.optimizer.init(params)
         return params, opt_state
 
+    def _build_jit_step(self):
+        """Build a JIT-compiled training step function."""
+        rssm_cfg = self.rssm_cfg
+        cfg = self.cfg
+        optimizer = self.optimizer
+
+        @jax.jit
+        def _step(params, opt_state, batch, rng):
+            def loss_fn(params):
+                return world_model_loss(params, rssm_cfg, cfg, batch, rng)
+
+            (loss, metrics), grads = jax.value_and_grad(
+                loss_fn, has_aux=True
+            )(params)
+
+            updates, new_opt_state = optimizer.update(grads, opt_state, params)
+            new_params = optax.apply_updates(params, updates)
+
+            grad_norm = optax.global_norm(grads)
+            metrics['grad_norm'] = grad_norm
+
+            return new_params, new_opt_state, metrics
+
+        return _step
+
     def train_step(self, params: dict, opt_state: Any,
                    batch: dict, rng) -> tuple[dict, Any, dict]:
-        """Single training step.
+        """Single training step (JIT-compiled).
 
         Returns:
             (new_params, new_opt_state, metrics)
         """
         batch = preprocess_batch(batch, self.cfg)
 
-        rssm_cfg = self.rssm_cfg
-        cfg = self.cfg
+        if not hasattr(self, '_jit_step'):
+            self._jit_step = self._build_jit_step()
 
-        def loss_fn(params):
-            return world_model_loss(params, rssm_cfg, cfg, batch, rng)
-
-        (loss, metrics), grads = jax.value_and_grad(
-            loss_fn, has_aux=True
-        )(params)
-
-        updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
-        new_params = optax.apply_updates(params, updates)
-
-        # Add gradient norm to metrics
-        grad_norm = optax.global_norm(grads)
-        metrics['grad_norm'] = grad_norm
-
-        return new_params, new_opt_state, metrics
+        return self._jit_step(params, opt_state, batch, rng)
 
     def train_epoch(self, params: dict, opt_state: Any,
                     dataset, rng) -> tuple[dict, Any, list[dict]]:
