@@ -1,0 +1,12 @@
+# AURA — Local development (CPU inference, data gen)
+# For Colab/GPU training, use requirements-colab.txt
+
+jax
+jaxlib
+numpy
+librosa
+fastapi
+uvicorn
+pillow
+soundfile
+gymnasium

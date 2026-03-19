@@ -1,0 +1,15 @@
+# AURA — Colab training (GPU)
+# Run in Colab after: !pip install jax[cuda12] -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+jax[cuda12]
+jaxlib
+numpy
+librosa
+pillow
+soundfile
+gymnasium
+wandb
+einops
+optax
+chex
+tqdm

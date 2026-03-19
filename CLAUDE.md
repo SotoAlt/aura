@@ -1,0 +1,149 @@
+# AURA — Audio-Conditioned World Model
+
+## Project Overview
+
+AURA is an audio-conditioned world model that generates and simulates alien corridor environments in real time, driven by audio features. The neural network IS the engine — it learns physics, spatial structure, and dynamics, then predicts future states frame by frame.
+
+- **Studio**: WAWE Studio (Chile)
+- **Repo**: github.com/SotoAlt/aura (private)
+- **Domain**: waweapps.win
+- **Deadline**: April 14, 2026 (demo) / April 30, 2026 (competition)
+- **Status**: Scaffolding complete, entering P0 (Foundation)
+
+## Architecture
+
+```
+Audio Input → FFT/Feature Extraction → 16-float context vector (c_t)
+                                              ↓
+                    cRSSM: h_t = f(h_{t-1}, z_{t-1}, a_t, c_t)
+                                              ↓
+                              Decoder → 64×64 RGB frame
+                                              ↓
+                         Three.js → Browser visualization
+```
+
+Three systems:
+1. **World Model** (Python/JAX): Vendored DreamerV3 fork with cRSSM audio conditioning
+2. **Browser Client** (Three.js/Vite): Renders decoded frames, captures audio via Web Audio API
+3. **Inference Server** (FastAPI): Bridges world model to browser via WebSocket
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| World Model | DreamerV3 fork (JAX) — cRSSM with 16-float audio context |
+| Training | Google Colab (A100/T4) |
+| Data Generation | Custom Python corridor sim (NumPy) |
+| Audio Analysis | librosa (training), Web Audio API (inference) |
+| 3D Rendering | Three.js |
+| Inference Server | FastAPI + WebSocket |
+| Client Bundler | Vite |
+
+## Directory Structure
+
+```
+aura/
+  world_model/                  Python: DreamerV3 fork + training pipeline
+    dreamer/                    Vendored DreamerV3 (JAX) — cRSSM modifications
+      rssm.py                   ★ Core: cRSSM with audio context conditioning
+      agent.py                  ★ Modified: audio context flow
+      configs.yaml              AURA-specific training configs
+      main.py                   Training entry point
+    embodied/                   Vendored DreamerV3 framework (mostly unchanged)
+    envs/
+      corridor.py               ★ Gymnasium env: procedural alien corridor
+      audio_env.py              Audio feature injection wrapper
+    audio/
+      features.py               ★ librosa: FFT bands, onset, BPM, spectral centroid
+      synthetic.py              Procedural audio generation for training
+    train.py                    Training launcher
+    infer.py                    ★ FastAPI inference server
+    requirements.txt            Local deps (CPU)
+    requirements-colab.txt      Colab deps (GPU)
+  client/                       Browser: Three.js + Vite
+    src/
+      audio.js                  Web Audio API, FFT, beat detection
+      world.js                  Three.js scene rendering
+      net.js                    WebSocket client
+      main.js                   Entry point
+  server/                       Deferred: WebSocket event server (multiplayer)
+  notebooks/
+    01_data_generation.ipynb    Colab: generate datasets
+    02_train_aura.ipynb         Colab: train world model
+    03_eval_dreams.ipynb        Colab: visualize imagined trajectories
+  data/                         Generated training data (gitignored)
+  checkpoints/                  Model weights (gitignored)
+```
+
+★ = key files to read first
+
+## Development Commands
+
+```bash
+# Python virtual environment
+cd world_model
+source .venv/bin/activate
+
+# Generate small test dataset (local, CPU)
+python -m envs.corridor --episodes 100 --output ../data/test
+
+# Run inference server (CPU)
+JAX_PLATFORM=cpu python infer.py --checkpoint ../checkpoints/aura-v0.1
+
+# Client dev server
+cd client
+npx vite
+
+# Test JAX installation
+python -c "import jax; print(jax.devices())"
+```
+
+## Colab Workflow
+
+```python
+# In any Colab notebook:
+!git clone https://github.com/SotoAlt/aura.git
+%cd aura/world_model
+!pip install -r requirements-colab.txt
+
+# Mount Google Drive for data/checkpoints
+from google.colab import drive
+drive.mount('/content/drive')
+```
+
+## Audio Context Vector (16 floats)
+
+| Index | Feature | Range | World Effect |
+|-------|---------|-------|-------------|
+| 0-1 | Sub-bass energy (20-80 Hz) | [0,1] | Organic structure growth |
+| 2-3 | Mid energy (250 Hz-2 kHz) | [0,1] | Color saturation, light |
+| 4-5 | High frequency (4-20 kHz) | [0,1] | Particle/detail complexity |
+| 6-7 | Onset detection | [0,1] | Discrete physics events |
+| 8-9 | Estimated BPM (normalized) | [0,1] | Camera forward velocity |
+| 10-11 | Spectral centroid | [0,1] | World temperature (palette) |
+| 12-13 | RMS energy | [0,1] | Overall activity level |
+| 14-15 | Reserved | [0,1] | Future features |
+
+## Constraints
+
+- **Hardware**: 16GB RAM MacBook Air M3, ~21GB disk free
+- **No local training** — all training on Google Colab
+- **No local GPU** — CPU inference only (JAX `--jax.platform cpu`)
+- **Disk budget**: ~1.3GB for project (venv + node_modules + test data)
+- **Memory**: Data generation must be episode-at-a-time, never hold full dataset in RAM
+
+## Key References
+
+- [DreamerV3](https://github.com/danijar/dreamerv3) — Base architecture (JAX, MIT license)
+- [cRSSM / Dreaming of Many Worlds](https://github.com/sai-prasanna/dreaming_of_many_worlds) — Context conditioning pattern
+- [AURA PRD](./docs/AURA_PRD.md) — Full product requirements document
+
+## Development Phases
+
+| Phase | Status | Goal |
+|-------|--------|------|
+| P0: Foundation | **Current** | Corridor env + audio pipeline + DreamerV3 fork |
+| P1: Training | Pending | Train on Colab, validate audio→world correlation |
+| P2: Browser Demo | Pending | FastAPI inference + Three.js client |
+| P3: Rhythm Mechanic | Deferred | Beat detection, interactive nodes, scoring |
+| P4: Multiplayer | Deferred | WebSocket server, multi-client sync |
