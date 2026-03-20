@@ -27,7 +27,7 @@ echo "=== Step 3: Train 128x128 (5K steps) ==="
 python -m world_model.train \
   --config aura_128 \
   --data /content/video_data_128 \
-  --steps 5000 \
+  --steps ${AURA_STEPS:-5000} \
   --checkpoint /content/aura/checkpoints/aura-v0.3-128.ckpt \
   --no-wandb
 
