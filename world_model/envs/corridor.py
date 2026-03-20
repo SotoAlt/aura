@@ -11,10 +11,10 @@ from gymnasium import spaces
 
 from world_model.audio.features import unpack_context
 
-# Color palette constants
-_COOL = np.array([40, 20, 120], dtype=np.float32)
-_WARM = np.array([180, 60, 30], dtype=np.float32)
-_GLOW = np.array([0, 40, 60], dtype=np.float32)
+# Color palette constants — vivid alien corridor
+_COOL = np.array([80, 50, 255], dtype=np.float32)
+_WARM = np.array([255, 100, 50], dtype=np.float32)
+_GLOW = np.array([0, 255, 180], dtype=np.float32)
 
 FORWARD, TURN_LEFT, TURN_RIGHT = 0, 1, 2
 
@@ -200,11 +200,11 @@ class CorridorEnv(gym.Env):
         # --- Compute wall colors (vectorized over columns) ---
         base = _COOL * (1 - af['temperature']) + _WARM * af['temperature']  # (3,)
         gray = np.mean(base)
-        base = gray + (base - gray) * (0.3 + af['mid'] * 0.7)
-        base = base + _GLOW * af['bass']
+        base = gray + (base - gray) * (0.5 + af['mid'] * 0.5)
+        base = base + _GLOW * af['bass'] * 0.6
 
-        brightness = 0.3 + af['rms'] * 0.7
-        fog = np.maximum(0.1, 1.0 - perp_dist / 12.0)  # (W,)
+        brightness = 0.8 + af['rms'] * 0.2
+        fog = np.maximum(0.25, 1.0 - perp_dist / 20.0)  # (W,)
         col_brightness = brightness * fog  # (W,)
         side_shade = np.where(side == 1, 0.7, 1.0)  # (W,)
 
@@ -213,10 +213,10 @@ class CorridorEnv(gym.Env):
         wall_colors = np.clip(wall_colors, 0, 255).astype(np.uint8)  # (W, 3)
 
         # --- Compute floor/ceiling colors (vectorized) ---
-        floor_base = np.array([20 + af['temperature'] * 30, 15,
-                               25 + (1 - af['temperature']) * 20], dtype=np.float32)
-        ceil_base = np.array([10, 8 + af['temperature'] * 15,
-                              15 + (1 - af['temperature']) * 15], dtype=np.float32)
+        floor_base = np.array([60 + af['temperature'] * 80, 40 + af['bass'] * 60,
+                               70 + (1 - af['temperature']) * 80], dtype=np.float32)
+        ceil_base = np.array([25 + af['high'] * 50, 20 + af['temperature'] * 60,
+                              50 + (1 - af['temperature']) * 60], dtype=np.float32)
 
         # --- Fill image column by column (only the slice logic, colors are precomputed) ---
         ys = np.arange(h, dtype=np.float32)
@@ -224,7 +224,7 @@ class CorridorEnv(gym.Env):
             if not hit[x]:
                 # No wall — all ceiling
                 fracs = ys / h
-                colors = ceil_base[None, :] * ((0.2 + af['rms'] * 0.3) * (0.5 + (1 - fracs) * 0.5))[:, None]
+                colors = ceil_base[None, :] * ((0.4 + af['rms'] * 0.6) * (0.5 + (1 - fracs) * 0.5))[:, None]
                 image[:, x] = np.clip(colors, 0, 255).astype(np.uint8)
                 continue
 
@@ -236,14 +236,14 @@ class CorridorEnv(gym.Env):
             # Ceiling
             if ds > 0:
                 fracs = ys[:ds] / max(ds, 1)
-                colors = ceil_base[None, :] * ((0.2 + af['rms'] * 0.3) * (0.5 + (1 - fracs) * 0.5))[:, None]
+                colors = ceil_base[None, :] * ((0.4 + af['rms'] * 0.6) * (0.5 + (1 - fracs) * 0.5))[:, None]
                 image[:ds, x] = np.clip(colors, 0, 255).astype(np.uint8)
 
             # Floor
             if de < h:
                 n_floor = h - de
                 fracs = (ys[de:] - de) / max(n_floor, 1)
-                colors = floor_base[None, :] * ((0.3 + af['rms'] * 0.4) * (0.5 + fracs * 0.5))[:, None]
+                colors = floor_base[None, :] * ((0.5 + af['rms'] * 0.5) * (0.5 + fracs * 0.5))[:, None]
                 image[de:, x] = np.clip(colors, 0, 255).astype(np.uint8)
 
         return image

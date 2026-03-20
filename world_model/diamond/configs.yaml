@@ -1,0 +1,47 @@
+# DIAMOND diffusion world model configs for AURA
+
+aura_diamond_tiny:
+  # CPU smoke test — minimal config
+  image_size: 64
+  channels: [32, 64, 128]
+  num_res_blocks: 1
+  attention_at: []
+  context_frames: 4
+  cond_dim: 16
+  denoising_steps: 3
+  batch_size: 4
+  lr: 1.0e-4
+  grad_clip: 1.0
+  ema_decay: 0.999
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  P_mean: -1.2
+  P_std: 1.2
+  ar_start_step: 0  # no AR for smoke test
+  ar_fraction: 0.0
+  ar_rollout_len: 0
+
+aura_diamond:
+  # Full training config for Colab T4
+  image_size: 64
+  channels: [64, 128, 256, 256]
+  num_res_blocks: 2
+  attention_at: [8]  # self-attention at 8x8 resolution
+  context_frames: 4
+  cond_dim: 16
+  denoising_steps: 3
+  batch_size: 32
+  lr: 2.0e-4
+  grad_clip: 1.0
+  ema_decay: 0.999
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  P_mean: -1.2
+  P_std: 1.2
+  ar_start_step: 20000  # enable AR rollouts after 20K steps
+  ar_fraction: 0.5      # 50% of batches use AR rollouts
+  ar_rollout_len: 4     # roll out 4 frames during AR training
