@@ -19,8 +19,73 @@ from PIL import Image
 from world_model.dreamer.agent import (
     load_config, make_rssm_config, imagine_trajectory,
 )
-from world_model.dreamer.rssm import initial_state
+from world_model.dreamer.nets import encoder_forward, decoder_forward
+from world_model.dreamer.rssm import initial_state, observe, get_features
 from world_model.dreamer.checkpoint import load_checkpoint
+
+
+def seed_and_imagine(params: dict, cfg: dict, seed_frames: np.ndarray,
+                     seed_contexts: np.ndarray, imagine_contexts: np.ndarray,
+                     seed_actions: np.ndarray | None = None,
+                     imagine_actions: np.ndarray | None = None) -> np.ndarray:
+    """Encode real frames to build RSSM state, then imagine forward.
+
+    Args:
+        params: World model parameters.
+        cfg: Training config dict.
+        seed_frames: (S, H, W, 3) float32 [0,1] — real frames to encode.
+        seed_contexts: (S, 16) audio contexts for seed frames.
+        imagine_contexts: (T, 16) audio contexts for imagination.
+        seed_actions: (S,) int actions for seed. Default: all zeros.
+        imagine_actions: (T,) int actions for imagination. Default: all zeros.
+
+    Returns:
+        (T, H, W, 3) imagined frames in [0, 1].
+    """
+    rssm_cfg = make_rssm_config(cfg)
+    S = len(seed_frames)
+    T = len(imagine_contexts)
+
+    # Default actions
+    if seed_actions is None:
+        seed_actions = np.zeros(S, dtype=np.int32)
+    if imagine_actions is None:
+        imagine_actions = np.zeros(T, dtype=np.int32)
+
+    # Add batch dim
+    seed_frames_b = jnp.array(seed_frames[None])        # (1, S, H, W, 3)
+    seed_ctx_b = jnp.array(seed_contexts[None])          # (1, S, 16)
+    seed_act_oh = jax.nn.one_hot(jnp.array(seed_actions[None]), cfg['action_dim'])
+    is_firsts = jnp.concatenate([jnp.ones((1, 1)), jnp.zeros((1, S - 1))], axis=1)
+
+    # Encode seed frames
+    B = 1
+    flat = seed_frames_b.reshape(B * S, *seed_frames_b.shape[2:])
+    embeds_flat = encoder_forward(params['encoder'], flat)
+    embeds = embeds_flat.reshape(B, S, -1)
+
+    # Run RSSM observe to build state from real frames
+    init_s = initial_state(rssm_cfg, B)
+    rng = jax.random.key(1)
+    posteriors, _ = observe(
+        params['rssm'], rssm_cfg, init_s,
+        seed_act_oh, embeds, is_firsts, seed_ctx_b, rng,
+    )
+
+    # Extract final state after observing all seed frames
+    final_state = jax.tree.map(lambda x: x[:, -1:], posteriors)
+    # Squeeze the time dim to get (B, ...) for each leaf
+    final_state = jax.tree.map(lambda x: x[:, 0], final_state)
+
+    # Now imagine forward from this state
+    img_act_oh = jax.nn.one_hot(jnp.array(imagine_actions[None]), cfg['action_dim'])
+    img_ctx = jnp.array(imagine_contexts[None])
+
+    frames = imagine_trajectory(
+        params, rssm_cfg, final_state,
+        img_act_oh, img_ctx, rng,
+    )
+    return np.array(frames[0])  # (T, H, W, 3)
 
 
 def imagine_from_params(params: dict, cfg: dict, contexts: np.ndarray,
@@ -183,12 +248,15 @@ def _make_context_sequence(T: int, scenario: str) -> np.ndarray:
     return ctx
 
 
-def eval_report(checkpoint_path: str, output_dir: str, n_frames: int = 50):
+def eval_report(checkpoint_path: str, output_dir: str, n_frames: int = 50,
+                seed_data: str | None = None):
     """Run full evaluation: all scenarios, GIFs, correlation metrics.
 
     Args:
         checkpoint_path: Path to checkpoint.
         output_dir: Directory for output GIFs and metrics.
+        seed_data: Optional path to NPZ episode dir. If provided, seeds
+                   imagination from real video frames for forward motion.
     """
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -199,11 +267,27 @@ def eval_report(checkpoint_path: str, output_dir: str, n_frames: int = 50):
     print(f'Evaluating checkpoint: {checkpoint_path}')
     print(f'Output: {output_dir}')
     print(f'Frames per scenario: {n_frames}')
+    if seed_data:
+        print(f'Seed data: {seed_data}')
     print()
 
     # Load checkpoint once
     ckpt = load_checkpoint(checkpoint_path)
     params, cfg = ckpt['params'], ckpt['cfg']
+
+    # If seed_data provided, load some real frames for seeded imagination
+    seed_frames = None
+    seed_contexts = None
+    if seed_data:
+        seed_path = Path(seed_data)
+        episodes = sorted(seed_path.glob('episode_*.npz'))
+        if episodes:
+            ep = np.load(episodes[len(episodes) // 2])  # pick a mid episode
+            # Use first 10 frames as seed
+            n_seed = min(10, len(ep['image']) - 1)
+            seed_frames = ep['image'][:n_seed].astype(np.float32) / 255.0
+            seed_contexts = ep['context'][:n_seed]
+            print(f'Seeding from {n_seed} real frames')
 
     for scenario in scenarios:
         print(f'Scenario: {scenario}...', end=' ')
@@ -211,9 +295,15 @@ def eval_report(checkpoint_path: str, output_dir: str, n_frames: int = 50):
         # Generate context
         ctx = _make_context_sequence(n_frames, scenario)
 
-        # Imagine trajectory
-        frames = imagine_from_params(params, cfg, ctx)
-        frames_single = frames[0]  # (T, 64, 64, 3)
+        if seed_frames is not None:
+            # Seed from real frames, then imagine forward
+            frames_single = seed_and_imagine(
+                params, cfg, seed_frames, seed_contexts, ctx
+            )
+        else:
+            # Imagine from scratch (original behavior)
+            frames = imagine_from_params(params, cfg, ctx)
+            frames_single = frames[0]  # (T, H, W, 3)
 
         # Save GIF
         gif_path = output / f'{scenario}.gif'
@@ -281,6 +371,9 @@ if __name__ == '__main__':
                         help='Output directory for GIFs and metrics')
     parser.add_argument('--frames', type=int, default=50,
                         help='Frames per scenario')
+    parser.add_argument('--seed-data', type=str, default=None,
+                        help='Path to NPZ episode dir for seeded imagination')
     args = parser.parse_args()
 
-    eval_report(args.checkpoint, args.output, n_frames=args.frames)
+    eval_report(args.checkpoint, args.output, n_frames=args.frames,
+                seed_data=args.seed_data)

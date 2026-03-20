@@ -31,10 +31,11 @@ python -m world_model.train \
   --checkpoint /content/aura/checkpoints/aura-v0.3-128.ckpt \
   --no-wandb
 
-echo "=== Step 4: Evaluate ==="
+echo "=== Step 4: Evaluate (seeded from real video frames) ==="
 python -m world_model.eval \
   --checkpoint /content/aura/checkpoints/aura-v0.3-128.ckpt \
-  --output /content/eval_128/
+  --output /content/eval_128/ \
+  --seed-data /content/video_data_128
 
 echo "=== Done! Run this in a Python cell to download: ==="
 echo "import shutil; shutil.make_archive('/content/eval_128_gifs','zip','/content/eval_128')"
