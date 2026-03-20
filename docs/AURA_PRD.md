@@ -130,6 +130,48 @@ Extracted per frame (~10-30fps) using Web Audio API (browser) or librosa (traini
 
 ---
 
+### 3.5 Decoder Upgrade Path: CNN → Diffusion
+
+The V1 CNN decoder produces blurry 64x64 output due to MSE loss averaging. For a navigable world where the neural output IS the rendered environment, visual quality must improve. Three upgrade tiers:
+
+**Tier 1 — CNN 128x128 (current upgrade, T4-compatible)**
+- Add 5th conv/deconv layer: 128→64→32→16→8→4
+- Config: `aura_128` with `encoder_channels: [32, 64, 128, 256, 512]`
+- 4x more pixels, same architecture. Sharper but still soft edges.
+- Training: ~2x slower than 64x64 on T4
+
+**Tier 2 — Diffusion Decoder (DIAMOND-style, target for demo)**
+- Keep cRSSM for dynamics + audio conditioning (it's great at this)
+- Replace CNN decoder with a small DDPM conditioned on RSSM features
+- 10-20 denoising steps → sharp 128x128 or 256x256 frames
+- Reference: DIAMOND (Alonso et al., 2024) — diffusion world model for Atari/CS:GO
+- Reference: GameNGen (Google, 2024) — real-time DOOM via diffusion world model
+- Inference: ~50-100ms/frame (acceptable at 10-15fps for rail navigation)
+- Training: needs A100, ~4-8 hours for 256x256
+
+**Tier 3 — VAE-GAN Decoder (alternative)**
+- Add discriminator network that penalizes blurry output
+- Faster than diffusion (~5-10ms/frame) but harder to train (GAN instability)
+- Good fallback if diffusion is too slow for real-time
+
+**Architecture diagram (Tier 2):**
+```
+Audio → FFT → context c_t
+                    ↓
+cRSSM: h_t = f(h_{t-1}, z_{t-1}, a_t, c_t)   ← dynamics (unchanged)
+                    ↓
+            features = [h_t, z_t]
+                    ↓
+    Diffusion Decoder (conditioned on features)  ← replaces CNN
+            noise → denoise × 15 steps
+                    ↓
+            256×256 RGB frame                    ← navigable output
+```
+
+**Decision:** Start with Tier 1 (128x128 CNN) for immediate improvement. Implement Tier 2 (diffusion decoder) before April 14 demo if 128x128 CNN quality isn't sufficient for navigation.
+
+---
+
 ## 4. Training Pipeline
 
 ### 4.1 Synthetic Data Generation

@@ -59,17 +59,20 @@ def init_world_model(rng, cfg: dict) -> dict[str, Any]:
     rssm_cfg = make_rssm_config(cfg)
     feat_dim = rssm_cfg.deter_dim + rssm_cfg.stoch_dim * rssm_cfg.classes
 
+    image_size = cfg.get('image_size', 64)
     return {
         'encoder': init_encoder(
             keys[0],
             channels=cfg['encoder_channels'],
             embed_dim=cfg['embed_dim'],
+            image_size=image_size,
         ),
         'rssm': init_rssm(keys[1], rssm_cfg),
         'decoder': init_decoder(
             keys[2],
             embed_dim=feat_dim,
             channels=cfg['decoder_channels'],
+            image_size=image_size,
         ),
         'reward_head': init_mlp(keys[3], [feat_dim, cfg['hidden_dim'], 1]),
     }
@@ -82,9 +85,10 @@ def world_model_loss(params: dict, rssm_cfg: RSSMConfig, cfg: dict,
     Expects batch with one-hot actions (B, T, action_dim) and float arrays.
     """
     B, T = batch['image'].shape[:2]
+    img_h, img_w = batch['image'].shape[2], batch['image'].shape[3]
 
     # Encode all observations
-    images_flat = batch['image'].reshape(B * T, 64, 64, 3)
+    images_flat = batch['image'].reshape(B * T, img_h, img_w, 3)
     embeds_flat = encoder_forward(params['encoder'], images_flat)
     embeds = embeds_flat.reshape(B, T, -1)
 
@@ -102,7 +106,7 @@ def world_model_loss(params: dict, rssm_cfg: RSSMConfig, cfg: dict,
     # Decode images
     features_flat = features.reshape(B * T, -1)
     decoded_flat = decoder_forward(params['decoder'], features_flat)
-    decoded = decoded_flat.reshape(B, T, 64, 64, 3)
+    decoded = decoded_flat.reshape(B, T, img_h, img_w, 3)
 
     # Image reconstruction loss (MSE)
     image_loss = jnp.mean((decoded - batch['image']) ** 2)
@@ -143,7 +147,7 @@ def imagine_trajectory(params: dict, rssm_cfg: RSSMConfig, init_state: RSSMState
         rng: PRNG key
 
     Returns:
-        (B, T, 64, 64, 3) predicted frames in [0, 1].
+        (B, T, H, W, 3) predicted frames in [0, 1].
     """
     from world_model.dreamer.rssm import imagine as rssm_imagine
 
@@ -152,7 +156,9 @@ def imagine_trajectory(params: dict, rssm_cfg: RSSMConfig, init_state: RSSMState
     B, T = features.shape[:2]
     features_flat = features.reshape(B * T, -1)
     decoded = decoder_forward(params['decoder'], features_flat)
-    return decoded.reshape(B, T, 64, 64, 3)
+    # decoded is (B*T, H, W, 3) — reshape batch dims back
+    H, W = decoded.shape[1], decoded.shape[2]
+    return decoded.reshape(B, T, H, W, 3)
 
 
 def preprocess_batch(batch: dict, cfg: dict) -> dict:
@@ -194,9 +200,19 @@ class Trainer:
         rssm_cfg = self.rssm_cfg
         cfg = self.cfg
         optimizer = self.optimizer
+        action_dim = cfg['action_dim']
 
         @jax.jit
         def _step(params, opt_state, batch, rng):
+            # Preprocess inside JIT so tracing is stable
+            batch = {
+                'image': batch['image'].astype(jnp.float32),
+                'action': jax.nn.one_hot(batch['action'], action_dim),
+                'context': batch['context'],
+                'reward': batch['reward'].astype(jnp.float32),
+                'is_first': batch['is_first'].astype(jnp.float32),
+            }
+
             def loss_fn(params):
                 return world_model_loss(params, rssm_cfg, cfg, batch, rng)
 
@@ -221,8 +237,6 @@ class Trainer:
         Returns:
             (new_params, new_opt_state, metrics)
         """
-        batch = preprocess_batch(batch, self.cfg)
-
         if not hasattr(self, '_jit_step'):
             self._jit_step = self._build_jit_step()
 

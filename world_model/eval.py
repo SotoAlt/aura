@@ -34,7 +34,7 @@ def imagine_from_params(params: dict, cfg: dict, contexts: np.ndarray,
         actions: (T,) or (B, T) int actions. If None, uses action 0 (forward).
 
     Returns:
-        (B, T, 64, 64, 3) predicted frames in [0, 1].
+        (B, T, H, W, 3) predicted frames in [0, 1].
     """
     rssm_cfg = make_rssm_config(cfg)
 
@@ -64,7 +64,7 @@ def make_gif(frames: np.ndarray, path: str, fps: int = 10, scale: int = 4):
     """Save frames as animated GIF.
 
     Args:
-        frames: (T, 64, 64, 3) float32 [0,1] or uint8.
+        frames: (T, H, W, 3) float32 [0,1] or uint8.
         path: Output file path.
         fps: Frames per second.
         scale: Upscale factor for visibility.
@@ -76,10 +76,11 @@ def make_gif(frames: np.ndarray, path: str, fps: int = 10, scale: int = 4):
         frames = (np.clip(frames, 0, 1) * 255).astype(np.uint8)
 
     images = []
+    H, W = frames.shape[1], frames.shape[2]
     for f in frames:
         img = Image.fromarray(f)
         if scale > 1:
-            img = img.resize((64 * scale, 64 * scale), Image.NEAREST)
+            img = img.resize((W * scale, H * scale), Image.NEAREST)
         images.append(img)
 
     duration = int(1000 / fps)

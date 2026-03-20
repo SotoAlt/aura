@@ -154,7 +154,7 @@ def train(cfg_name: str, data_dir: str, steps: int, checkpoint_path: str,
             )
             contexts = jnp.ones((1, T_imagine, cfg['context_dim'])) * 0.5
             frames = imagine_trajectory(params, rssm_cfg, init_s, actions, contexts, img_rng)
-            frames_np = np.array(frames[0])  # (T, 64, 64, 3)
+            frames_np = np.array(frames[0])  # (T, H, W, 3)
             log_frames(frames_np, step + 1, 'imagined')
 
     # Final save

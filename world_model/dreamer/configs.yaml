@@ -1,7 +1,7 @@
 # AURA world model configurations
 
 aura:
-  # Production config (Colab A100/T4)
+  # Production config — 64x64 (Colab T4)
   deter_dim: 1024
   stoch_dim: 32
   classes: 32
@@ -9,17 +9,44 @@ aura:
   embed_dim: 512
   action_dim: 3
   context_dim: 16
+  image_size: 64
   add_dcontext: true
   add_context_prior: true
   add_context_posterior: true
   free_nats: 1.0
   unimix: 0.01
-  # Encoder/decoder
+  # Encoder/decoder (4 layers for 64x64)
   encoder_channels: [32, 64, 128, 256]
   decoder_channels: [256, 128, 64, 32]
   # Training
   lr: 3.0e-4
   batch_size: 16
+  seq_length: 50
+  kl_scale: 1.0
+  reward_scale: 1.0
+  grad_clip: 100.0
+
+aura_128:
+  # 128x128 config (Colab T4) — sharper navigable output
+  deter_dim: 1024
+  stoch_dim: 32
+  classes: 32
+  hidden_dim: 512
+  embed_dim: 512
+  action_dim: 3
+  context_dim: 16
+  image_size: 128
+  add_dcontext: true
+  add_context_prior: true
+  add_context_posterior: true
+  free_nats: 1.0
+  unimix: 0.01
+  # Encoder/decoder (5 layers for 128x128: 128→64→32→16→8→4)
+  encoder_channels: [32, 64, 128, 256, 512]
+  decoder_channels: [512, 256, 128, 64, 32]
+  # Training (smaller batch to fit T4 VRAM)
+  lr: 3.0e-4
+  batch_size: 8
   seq_length: 50
   kl_scale: 1.0
   reward_scale: 1.0
@@ -34,6 +61,7 @@ aura_debug:
   embed_dim: 256
   action_dim: 3
   context_dim: 16
+  image_size: 64
   add_dcontext: true
   add_context_prior: true
   add_context_posterior: true

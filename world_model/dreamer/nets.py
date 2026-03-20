@@ -110,10 +110,12 @@ def gru_cell(params: Params, x: jnp.ndarray, h: jnp.ndarray) -> jnp.ndarray:
 
 # --- Encoder ---
 
-def init_encoder(rng, channels: list[int] = None, embed_dim: int = 512) -> Params:
-    """CNN encoder: 64×64×3 → embed_dim.
+def init_encoder(rng, channels: list[int] = None, embed_dim: int = 512,
+                 image_size: int = 64) -> Params:
+    """CNN encoder: image_size×image_size×3 → embed_dim.
 
-    4 conv layers with stride 2: 64→32→16→8→4, then flatten and project.
+    N conv layers with stride 2, then flatten and project.
+    Supports 64×64 (4 layers) and 128×128 (5 layers).
     """
     if channels is None:
         channels = [32, 64, 128, 256]
@@ -123,14 +125,15 @@ def init_encoder(rng, channels: list[int] = None, embed_dim: int = 512) -> Param
     for i, out_ch in enumerate(channels):
         convs.append(init_conv_params(keys[i], in_ch, out_ch, kernel=4))
         in_ch = out_ch
-    # After 4 stride-2 convs on 64×64: 4×4×channels[-1]
-    flat_dim = 4 * 4 * channels[-1]
+    # After N stride-2 convs: spatial_dim = image_size / 2^N
+    spatial = image_size // (2 ** len(channels))
+    flat_dim = spatial * spatial * channels[-1]
     proj = init_linear(keys[-1], flat_dim, embed_dim)
-    return {'convs': convs, 'proj': proj}
+    return {'convs': convs, 'proj': proj, '_spatial': spatial}
 
 
 def encoder_forward(params: Params, image: jnp.ndarray) -> jnp.ndarray:
-    """Encode image (B, 64, 64, 3) float [0,1] → (B, embed_dim)."""
+    """Encode image (B, H, W, 3) float [0,1] → (B, embed_dim)."""
     x = image
     for conv_params in params['convs']:
         x = conv2d(conv_params, x, stride=2)
@@ -146,32 +149,36 @@ def encoder_forward(params: Params, image: jnp.ndarray) -> jnp.ndarray:
 # --- Decoder ---
 
 def init_decoder(rng, embed_dim: int = 512,
-                 channels: list[int] = None) -> Params:
-    """Transposed CNN decoder: feature_dim → 64×64×3.
+                 channels: list[int] = None, image_size: int = 64) -> Params:
+    """Transposed CNN decoder: feature_dim → image_size×image_size×3.
 
-    Project to 4×4×channels[0], then 4 transposed convs.
+    Project to spatial×spatial×channels[0], then N transposed convs.
+    Supports 64×64 (4 layers) and 128×128 (5 layers).
     """
     if channels is None:
         channels = [256, 128, 64, 32]
     keys = jax.random.split(rng, len(channels) + 2)
 
-    proj = init_linear(keys[0], embed_dim, 4 * 4 * channels[0])
+    # spatial dim before upsampling = image_size / 2^N
+    spatial = image_size // (2 ** len(channels))
+    proj = init_linear(keys[0], embed_dim, spatial * spatial * channels[0])
     deconvs = []
     for i in range(len(channels) - 1):
         deconvs.append(init_conv_params(keys[i + 1], channels[i], channels[i + 1], kernel=4))
     # Final layer outputs 3 channels (RGB)
     deconvs.append(init_conv_params(keys[-1], channels[-1], 3, kernel=4))
-    return {'proj': proj, 'deconvs': deconvs}
+    return {'proj': proj, 'deconvs': deconvs, '_spatial': spatial}
 
 
 def decoder_forward(params: Params, features: jnp.ndarray) -> jnp.ndarray:
-    """Decode features (B, feat_dim) → (B, 64, 64, 3) in [0, 1]."""
+    """Decode features (B, feat_dim) → (B, H, W, 3) in [0, 1]."""
     batch = features.shape[0]
     x = linear(params['proj'], features)
     x = jax.nn.elu(x)
-    # Infer channels from proj weight shape: proj maps to 4*4*C, so C = out_dim / 16
-    init_channels = params['proj']['w'].shape[-1] // 16
-    x = x.reshape(batch, 4, 4, init_channels)
+    # Infer spatial dim and channels from stored _spatial or fallback
+    spatial = params.get('_spatial', 4)
+    init_channels = params['proj']['w'].shape[-1] // (spatial * spatial)
+    x = x.reshape(batch, spatial, spatial, init_channels)
 
     for i, deconv_params in enumerate(params['deconvs']):
         x = conv2d_transpose(deconv_params, x, stride=2)
