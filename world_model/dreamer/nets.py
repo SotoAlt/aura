@@ -129,7 +129,7 @@ def init_encoder(rng, channels: list[int] = None, embed_dim: int = 512,
     spatial = image_size // (2 ** len(channels))
     flat_dim = spatial * spatial * channels[-1]
     proj = init_linear(keys[-1], flat_dim, embed_dim)
-    return {'convs': convs, 'proj': proj, '_spatial': spatial}
+    return {'convs': convs, 'proj': proj}
 
 
 def encoder_forward(params: Params, image: jnp.ndarray) -> jnp.ndarray:
@@ -167,7 +167,7 @@ def init_decoder(rng, embed_dim: int = 512,
         deconvs.append(init_conv_params(keys[i + 1], channels[i], channels[i + 1], kernel=4))
     # Final layer outputs 3 channels (RGB)
     deconvs.append(init_conv_params(keys[-1], channels[-1], 3, kernel=4))
-    return {'proj': proj, 'deconvs': deconvs, '_spatial': spatial}
+    return {'proj': proj, 'deconvs': deconvs}
 
 
 def decoder_forward(params: Params, features: jnp.ndarray) -> jnp.ndarray:
@@ -175,9 +175,10 @@ def decoder_forward(params: Params, features: jnp.ndarray) -> jnp.ndarray:
     batch = features.shape[0]
     x = linear(params['proj'], features)
     x = jax.nn.elu(x)
-    # Infer spatial dim and channels from stored _spatial or fallback
-    spatial = params.get('_spatial', 4)
-    init_channels = params['proj']['w'].shape[-1] // (spatial * spatial)
+    # Infer spatial dim from first deconv kernel: kernel shape is (K, K, in_ch, out_ch)
+    init_channels = params['deconvs'][0]['w'].shape[2]  # in_ch of first deconv
+    proj_out = params['proj']['w'].shape[-1]
+    spatial = int((proj_out // init_channels) ** 0.5)
     x = x.reshape(batch, spatial, spatial, init_channels)
 
     for i, deconv_params in enumerate(params['deconvs']):
