@@ -46,16 +46,22 @@ def seed_and_imagine(params: dict, cfg: dict, seed_frames: np.ndarray,
     S = len(seed_frames)
     T = len(imagine_contexts)
 
-    # Default actions
+    action_dim = cfg['action_dim']
+
+    # Default actions: forward motion (continuous flow)
     if seed_actions is None:
-        seed_actions = np.zeros(S, dtype=np.int32)
+        seed_actions = np.tile([0.5, 0.0, 0.0], (S, 1)).astype(np.float32)
     if imagine_actions is None:
-        imagine_actions = np.zeros(T, dtype=np.int32)
+        imagine_actions = np.tile([0.8, 0.0, 0.0], (T, 1)).astype(np.float32)
 
     # Add batch dim
     seed_frames_b = jnp.array(seed_frames[None])        # (1, S, H, W, 3)
     seed_ctx_b = jnp.array(seed_contexts[None])          # (1, S, 16)
-    seed_act_oh = jax.nn.one_hot(jnp.array(seed_actions[None]), cfg['action_dim'])
+    # Handle both discrete (int) and continuous (float) actions
+    if seed_actions.dtype in (np.int32, np.int64):
+        seed_act_b = jax.nn.one_hot(jnp.array(seed_actions[None]), action_dim)
+    else:
+        seed_act_b = jnp.array(seed_actions[None].astype(np.float32))
     is_firsts = jnp.concatenate([jnp.ones((1, 1)), jnp.zeros((1, S - 1))], axis=1)
 
     # Encode seed frames
@@ -69,7 +75,7 @@ def seed_and_imagine(params: dict, cfg: dict, seed_frames: np.ndarray,
     rng = jax.random.key(1)
     posteriors, _ = observe(
         params['rssm'], rssm_cfg, init_s,
-        seed_act_oh, embeds, is_firsts, seed_ctx_b, rng,
+        seed_act_b, embeds, is_firsts, seed_ctx_b, rng,
     )
 
     # Extract final state after observing all seed frames
@@ -78,12 +84,15 @@ def seed_and_imagine(params: dict, cfg: dict, seed_frames: np.ndarray,
     final_state = jax.tree.map(lambda x: x[:, 0], final_state)
 
     # Now imagine forward from this state
-    img_act_oh = jax.nn.one_hot(jnp.array(imagine_actions[None]), cfg['action_dim'])
+    if imagine_actions.dtype in (np.int32, np.int64):
+        img_act = jax.nn.one_hot(jnp.array(imagine_actions[None]), action_dim)
+    else:
+        img_act = jnp.array(imagine_actions[None].astype(np.float32))
     img_ctx = jnp.array(imagine_contexts[None])
 
     frames = imagine_trajectory(
         params, rssm_cfg, final_state,
-        img_act_oh, img_ctx, rng,
+        img_act, img_ctx, rng,
     )
     return np.array(frames[0])  # (T, H, W, 3)
 
@@ -108,19 +117,22 @@ def imagine_from_params(params: dict, cfg: dict, contexts: np.ndarray,
         contexts = contexts[None]  # (1, T, 16)
     B, T = contexts.shape[:2]
 
-    # Build actions
+    # Build actions — continuous forward motion
     if actions is None:
-        actions = np.zeros((B, T), dtype=np.int32)
+        actions = np.tile([0.8, 0.0, 0.0], (B, T, 1)).astype(np.float32)
     if actions.ndim == 1:
         actions = actions[None]
-    actions_oh = jax.nn.one_hot(jnp.array(actions), cfg['action_dim'])
+    if actions.dtype in (np.int32, np.int64):
+        actions_enc = jax.nn.one_hot(jnp.array(actions), cfg['action_dim'])
+    else:
+        actions_enc = jnp.array(actions)
 
     # Imagine
     init_s = initial_state(rssm_cfg, B)
     rng = jax.random.key(0)
     frames = imagine_trajectory(
         params, rssm_cfg, init_s,
-        actions_oh, jnp.array(contexts), rng,
+        actions_enc, jnp.array(contexts), rng,
     )
     return np.array(frames)
 

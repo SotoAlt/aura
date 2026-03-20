@@ -139,6 +139,48 @@ def augment_frame(frame: np.ndarray, context: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Step 2.5: Optical flow actions
+# ---------------------------------------------------------------------------
+
+def compute_flow_actions(frames: np.ndarray) -> np.ndarray:
+    """Compute motion actions from consecutive frame differences.
+
+    Returns (N-1, 3) float32 array:
+        [0] forward_speed — overall motion magnitude (0-1)
+        [1] horizontal_shift — left/right bias (-1 to 1)
+        [2] vertical_shift — up/down bias (-1 to 1)
+
+    Uses simple frame differencing (fast, no OpenCV needed).
+    """
+    n = len(frames) - 1
+    actions = np.zeros((n, 3), dtype=np.float32)
+
+    for i in range(n):
+        # Frame difference as float
+        diff = frames[i + 1].astype(np.float32) - frames[i].astype(np.float32)
+        # diff shape: (H, W, 3)
+
+        # Forward speed: mean absolute pixel change, normalized
+        speed = np.mean(np.abs(diff)) / 255.0
+        actions[i, 0] = np.clip(speed * 10.0, 0, 1)  # scale up, most changes are small
+
+        # Horizontal shift: compare left half vs right half motion
+        H, W = diff.shape[:2]
+        left_energy = np.mean(np.abs(diff[:, :W // 2]))
+        right_energy = np.mean(np.abs(diff[:, W // 2:]))
+        total = left_energy + right_energy + 1e-8
+        actions[i, 1] = (right_energy - left_energy) / total  # -1 to 1
+
+        # Vertical shift: compare top half vs bottom half motion
+        top_energy = np.mean(np.abs(diff[:H // 2, :]))
+        bottom_energy = np.mean(np.abs(diff[H // 2:, :]))
+        total = top_energy + bottom_energy + 1e-8
+        actions[i, 2] = (bottom_energy - top_energy) / total  # -1 to 1
+
+    return actions
+
+
+# ---------------------------------------------------------------------------
 # Step 3: Synthetic context profiles for augmentation passes
 # ---------------------------------------------------------------------------
 
@@ -232,6 +274,12 @@ def build_episodes(frames_dir: Path, audio_path: Path, output_dir: str,
     all_frames = all_frames[:n_usable]
     real_contexts = real_contexts[:n_usable]
 
+    # Compute optical flow actions from raw frames
+    print('Computing flow actions ...')
+    all_flow_actions = compute_flow_actions(all_frames)
+    print(f'  flow: mean_speed={all_flow_actions[:, 0].mean():.3f}, '
+          f'range=[{all_flow_actions[:, 0].min():.3f}, {all_flow_actions[:, 0].max():.3f}]')
+
     # Sliding window
     window = steps_per_episode + 1  # images has steps+1 frames
     stride = 20
@@ -266,10 +314,13 @@ def build_episodes(frames_dir: Path, audio_path: Path, output_dir: str,
             for fi in range(len(window_frames)):
                 aug_frames[fi] = augment_frame(window_frames[fi], contexts[fi])
 
-            # Build NPZ episode (same format as generate.py)
+            # Flow actions for this window (continuous 3-float vectors)
+            window_actions = all_flow_actions[start:start + steps_per_episode]
+
+            # Build NPZ episode
             episode = {
-                'image': aug_frames,                                       # (T+1, 64, 64, 3) uint8
-                'action': np.zeros(steps_per_episode, dtype=np.int32),     # (T,) — forward only
+                'image': aug_frames,                                       # (T+1, H, W, 3) uint8
+                'action': window_actions.astype(np.float32),               # (T, 3) — flow actions
                 'context': contexts[:window].astype(np.float32),           # (T+1, 16)
                 'reward': np.zeros(steps_per_episode, dtype=np.float32),   # (T,)
                 'is_first': np.concatenate([

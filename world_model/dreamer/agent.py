@@ -167,7 +167,11 @@ def preprocess_batch(batch: dict, cfg: dict) -> dict:
     One-hot encodes actions, casts is_first/reward/image to float32.
     """
     batch = {**batch}
-    batch['action'] = jax.nn.one_hot(batch['action'], cfg['action_dim'])
+    action = batch['action']
+    if action.dtype in (jnp.int32, jnp.int64):
+        batch['action'] = jax.nn.one_hot(action, cfg['action_dim'])
+    else:
+        batch['action'] = action.astype(jnp.float32)
     batch['is_first'] = batch['is_first'].astype(jnp.float32)
     batch['reward'] = batch['reward'].astype(jnp.float32)
     batch['image'] = batch['image'].astype(jnp.float32)
@@ -205,9 +209,15 @@ class Trainer:
         @jax.jit
         def _step(params, opt_state, batch, rng):
             # Preprocess inside JIT so tracing is stable
+            action = batch['action']
+            # If actions are int (discrete), one-hot encode; if float (continuous), use as-is
+            if action.dtype in (jnp.int32, jnp.int64):
+                action = jax.nn.one_hot(action, action_dim)
+            else:
+                action = action.astype(jnp.float32)
             batch = {
                 'image': batch['image'].astype(jnp.float32),
-                'action': jax.nn.one_hot(batch['action'], action_dim),
+                'action': action,
                 'context': batch['context'],
                 'reward': batch['reward'].astype(jnp.float32),
                 'is_first': batch['is_first'].astype(jnp.float32),
