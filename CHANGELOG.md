@@ -5,6 +5,10 @@ All notable changes to AURA are documented here.
 ## [Unreleased] — P1: Training & Validation
 
 ### Added
+- Video data pipeline (`world_model/data/video.py`) — download YouTube video, extract frames + audio, apply audio-driven augmentations, build NPZ episodes
+- Audio-driven augmentation: brightness (RMS), color temperature (centroid), saturation (bass), contrast (onset), grain (high freq)
+- Synthetic context profiles (high/low/ramp/pulse) for augmentation variety
+- yt-dlp dependency for video download
 - Checkpoint save/load (`world_model/dreamer/checkpoint.py`)
 - wandb logging helpers (`world_model/dreamer/logging.py`)
 - Training script (`world_model/train.py`) — works locally (CPU) and on Colab (GPU)

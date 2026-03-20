@@ -15,3 +15,4 @@ chex
 einops
 tqdm
 pyyaml
+yt-dlp
