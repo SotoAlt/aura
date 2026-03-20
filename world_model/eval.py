@@ -18,6 +18,7 @@ from PIL import Image
 
 from world_model.dreamer.agent import (
     load_config, make_rssm_config, imagine_trajectory,
+    grounded_imagine_trajectory,
 )
 from world_model.dreamer.nets import encoder_forward, decoder_forward
 from world_model.dreamer.rssm import initial_state, observe, get_features
@@ -90,9 +91,11 @@ def seed_and_imagine(params: dict, cfg: dict, seed_frames: np.ndarray,
         img_act = jnp.array(imagine_actions[None].astype(np.float32))
     img_ctx = jnp.array(imagine_contexts[None])
 
-    frames = imagine_trajectory(
+    # Use grounded imagination — decode→re-encode every step to prevent drift
+    frames = grounded_imagine_trajectory(
         params, rssm_cfg, final_state,
         img_act, img_ctx, rng,
+        reground_every=1,
     )
     return np.array(frames[0])  # (T, H, W, 3)
 
@@ -127,12 +130,13 @@ def imagine_from_params(params: dict, cfg: dict, contexts: np.ndarray,
     else:
         actions_enc = jnp.array(actions)
 
-    # Imagine
+    # Imagine with grounded re-encoding to prevent drift
     init_s = initial_state(rssm_cfg, B)
     rng = jax.random.key(0)
-    frames = imagine_trajectory(
+    frames = grounded_imagine_trajectory(
         params, rssm_cfg, init_s,
         actions_enc, jnp.array(contexts), rng,
+        reground_every=1,
     )
     return np.array(frames)
 

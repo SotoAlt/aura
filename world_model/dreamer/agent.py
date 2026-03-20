@@ -161,6 +161,61 @@ def imagine_trajectory(params: dict, rssm_cfg: RSSMConfig, init_state: RSSMState
     return decoded.reshape(B, T, H, W, 3)
 
 
+def grounded_imagine_trajectory(params: dict, rssm_cfg: RSSMConfig,
+                                init_state: RSSMState,
+                                actions: jnp.ndarray, contexts: jnp.ndarray,
+                                rng, reground_every: int = 1) -> jnp.ndarray:
+    """Imagine trajectory with periodic decode→re-encode to prevent drift.
+
+    Instead of pure latent imagination (which collapses after ~15 steps),
+    this decodes the current state to a frame, re-encodes it, and uses
+    the posterior update to keep the RSSM grounded on its own output.
+
+    Args:
+        params: Full world model params (encoder + rssm + decoder).
+        rssm_cfg: RSSM config.
+        init_state: Starting RSSM state.
+        actions: (B, T, action_dim)
+        contexts: (B, T, context_dim)
+        rng: PRNG key.
+        reground_every: Re-encode decoded frame every N steps. 1 = every step.
+
+    Returns:
+        (B, T, H, W, 3) predicted frames in [0, 1].
+    """
+    from world_model.dreamer.rssm import img_step, obs_step
+
+    B, T = actions.shape[:2]
+    frames = []
+    state = init_state
+
+    for t in range(T):
+        rng, step_rng, obs_rng = jax.random.split(rng, 3)
+
+        # Prior step (standard imagination)
+        action_t = actions[:, t]
+        context_t = contexts[:, t]
+        state = img_step(params['rssm'], rssm_cfg, state, action_t, context_t, step_rng)
+
+        # Decode to frame
+        features = get_features(state)
+        frame = decoder_forward(params['decoder'], features)
+        frames.append(frame)
+
+        # Re-ground: encode the decoded frame and update posterior
+        if (t + 1) % reground_every == 0:
+            embed = encoder_forward(params['encoder'], frame)
+            is_first = jnp.zeros(B)
+            posterior, _ = obs_step(
+                params['rssm'], rssm_cfg, state, action_t, embed,
+                is_first, context_t, obs_rng,
+            )
+            state = posterior  # correct drift with self-observation
+
+    frames = jnp.stack(frames, axis=1)  # (B, T, H, W, 3)
+    return frames
+
+
 def preprocess_batch(batch: dict, cfg: dict) -> dict:
     """Pre-convert batch arrays for JAX differentiation.
 
