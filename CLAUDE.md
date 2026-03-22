@@ -15,15 +15,17 @@ AURA is an audio-conditioned world model that generates and simulates alien corr
 ```
 Audio Input → FFT/Feature Extraction → 16-float context vector (c_t)
                                               ↓
-                    cRSSM: h_t = f(h_{t-1}, z_{t-1}, a_t, c_t)
+          Previous 4 frames (x_{t-4}…x_{t-1}) + c_t + action a_t
                                               ↓
-                              Decoder → 64×64 RGB frame
+                  DIAMOND U-Net: denoise x_t over K diffusion steps
                                               ↓
-                         Three.js → Browser visualization
+                          Denoised frame x_t (64×64 RGB)
+                             ↓                ↓
+                    feedback (next window)   Three.js → Browser
 ```
 
 Three systems:
-1. **World Model** (Python/JAX): Lightweight cRSSM in plain JAX (NOT vendoring full DreamerV3 framework — its dep chain conflicts with modern Python/numpy)
+1. **World Model** (Python/PyTorch): DIAMOND v0.3 diffusion world model — pixel-space autoregressive frame prediction with audio conditioning
 2. **Browser Client** (Three.js/Vite): Renders decoded frames, captures audio via Web Audio API
 3. **Inference Server** (FastAPI): Bridges world model to browser via WebSocket
 
@@ -31,7 +33,7 @@ Three systems:
 
 | Layer | Technology |
 |-------|-----------|
-| World Model | Lightweight cRSSM (plain JAX + optax) — 16-float audio context |
+| World Model | DIAMOND diffusion U-Net (PyTorch) — pixel-space AR frame prediction |
 | Training | Google Colab (A100/T4) |
 | Data Generation | Custom Python corridor sim (NumPy) |
 | Audio Analysis | librosa (training), Web Audio API (inference) |
@@ -43,11 +45,20 @@ Three systems:
 
 ```
 aura/
-  world_model/                  Python: cRSSM world model + training pipeline
-    dreamer/                    Plain JAX cRSSM implementation
-      nets.py                   ★ CNN encoder/decoder, MLP, GRU primitives
-      rssm.py                   ★ Core: cRSSM with audio context conditioning
-      agent.py                  ★ WorldModel + Trainer (optax)
+  world_model/                  Python: world model + training pipeline
+    diamond/                    ★ DIAMOND v0.3 diffusion world model (PyTorch)
+      unet.py                   ★ U-Net with audio-context conditioning
+      diffusion.py              ★ DDPM forward/reverse process
+      dataset.py                ★ Frame-sequence dataset loader (NPZ)
+      train.py                  ★ Training loop (GPU, wandb)
+      sample.py                 ★ Autoregressive rollout / dream generation
+      eval.py                   Evaluation metrics (FVD, LPIPS, audio correlation)
+      utils.py                  Helpers (checkpoint I/O, normalization)
+      configs.yaml              DIAMOND training configs (aura + aura_debug)
+    dreamer/                    (legacy) Plain JAX cRSSM implementation
+      nets.py                   CNN encoder/decoder, MLP, GRU primitives
+      rssm.py                   Core: cRSSM with audio context conditioning
+      agent.py                  WorldModel + Trainer (optax)
       configs.yaml              AURA-specific training configs (aura + aura_debug)
       checkpoint.py             Save/load model checkpoints (pickle)
       logging.py                Optional wandb logging helpers
@@ -59,11 +70,14 @@ aura/
     data/
       generate.py               ★ Episode generator + NPZ dataset loader
     test_pipeline.py            End-to-end P0 verification
-    train.py                    ★ Training script (CPU + Colab GPU)
-    eval.py                     ★ Evaluation: GIFs + audio correlation metrics
+    train.py                    Training script (legacy cRSSM)
+    eval.py                     Evaluation (legacy cRSSM)
     infer.py                    ★ FastAPI inference server (P2)
     requirements.txt            Local deps (CPU)
     requirements-colab.txt      Colab deps (GPU)
+  scripts/
+    generate_data.sh            Data generation wrapper (episodes + audio)
+    train_diamond.sh            DIAMOND training launcher (Colab / local)
   client/                       Browser: Three.js + Vite
     src/
       audio.js                  Web Audio API, FFT, beat detection
@@ -94,24 +108,46 @@ python -m world_model.test_pipeline
 
 # Generate training data (local, CPU)
 python -m world_model.data.generate --episodes 100 --output data/test
+# Or via wrapper script:
+bash scripts/generate_data.sh --episodes 100 --output data/test
 
 # Run corridor env standalone
 python -m world_model.envs.corridor --episodes 10 --output data/test
 
-# Train (local CPU smoke test)
+# --- DIAMOND v0.3 commands ---
+
+# Train DIAMOND (local CPU smoke test)
+python -m world_model.diamond.train --config aura_debug --data data/smoke --steps 100 --checkpoint checkpoints/diamond_smoke.pt --no-wandb
+# Or via wrapper script:
+bash scripts/train_diamond.sh --config aura_debug --data data/smoke --steps 100
+
+# Train DIAMOND (Colab GPU)
+python -m world_model.diamond.train --config aura --data /content/drive/MyDrive/aura/data --steps 50000 --checkpoint /content/drive/MyDrive/aura/checkpoints/diamond_v0.1.pt
+
+# Evaluate DIAMOND checkpoint
+python -m world_model.diamond.eval --checkpoint checkpoints/diamond_smoke.pt --output eval_output/diamond_smoke/
+
+# Generate dream rollouts (autoregressive sampling)
+python -m world_model.diamond.sample --checkpoint checkpoints/diamond_smoke.pt --steps 64 --output eval_output/dreams/
+
+# --- Legacy cRSSM commands ---
+
+# Train cRSSM (local CPU smoke test)
 python -m world_model.train --config aura_debug --data data/smoke --steps 100 --checkpoint checkpoints/smoke.ckpt --no-wandb
 
-# Evaluate checkpoint
+# Evaluate cRSSM checkpoint
 python -m world_model.eval --checkpoint checkpoints/smoke.ckpt --output eval_output/smoke/
 
+# --- Shared ---
+
 # Run inference server (CPU) — P2
-JAX_PLATFORM=cpu python world_model/infer.py --checkpoint checkpoints/aura-v0.1
+python world_model/infer.py --checkpoint checkpoints/diamond_v0.1.pt
 
 # Client dev server
 cd client && npx vite
 
-# Test JAX installation
-python -c "import jax; print(jax.devices())"
+# Test PyTorch installation
+python -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ## Colab Workflow
@@ -125,6 +161,18 @@ python -c "import jax; print(jax.devices())"
 # Mount Google Drive for data/checkpoints
 from google.colab import drive
 drive.mount('/content/drive')
+
+# Train DIAMOND on Colab GPU
+!python -m world_model.diamond.train \
+    --config aura \
+    --data /content/drive/MyDrive/aura/data \
+    --steps 50000 \
+    --checkpoint /content/drive/MyDrive/aura/checkpoints/diamond_v0.1.pt
+
+# Generate dream rollouts
+!python -m world_model.diamond.sample \
+    --checkpoint /content/drive/MyDrive/aura/checkpoints/diamond_v0.1.pt \
+    --steps 64 --output eval_output/dreams/
 ```
 
 ## Audio Context Vector (16 floats)
@@ -159,7 +207,7 @@ drive.mount('/content/drive')
 | Phase | Status | Goal |
 |-------|--------|------|
 | P0: Foundation | **Complete** | Corridor env + audio pipeline + lightweight cRSSM (plain JAX) |
-| P1: Training | **In Progress** | Train on Colab, validate audio→world correlation |
+| P1: Training | **In Progress** | DIAMOND v0.3 diffusion world model — train on Colab, validate audio→world correlation |
 | P2: Browser Demo | Pending | FastAPI inference + Three.js client |
 | P3: Rhythm Mechanic | Deferred | Beat detection, interactive nodes, scoring |
 | P4: Multiplayer | Deferred | WebSocket server, multi-client sync |
