@@ -127,9 +127,9 @@ class LatentPredictor(nn.Module):
 # ---------------------------------------------------------------------------
 
 class GlyphDecoder(nn.Module):
-    def __init__(self, latent_dim: int = LATENT_DIM):
+    def __init__(self, latent_dim: int = LATENT_DIM, audio_dim: int = AUDIO_DIM):
         super().__init__()
-        self.project = nn.Linear(latent_dim, 128 * 5 * 10)
+        self.project = nn.Linear(latent_dim + audio_dim, 128 * 5 * 10)
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
             nn.BatchNorm2d(64), nn.ReLU(),
@@ -138,8 +138,12 @@ class GlyphDecoder(nn.Module):
             nn.ConvTranspose2d(32, VOCAB_SIZE, 4, stride=2, padding=1),
         )
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """z: (B, latent_dim) -> (B, VOCAB_SIZE, 40, 80)"""
+    def forward(self, z: torch.Tensor, audio: torch.Tensor = None) -> torch.Tensor:
+        """z: (B, latent_dim), audio: (B, 16) -> (B, VOCAB_SIZE, 40, 80)"""
+        if audio is not None:
+            z = torch.cat([z, audio], dim=1)
+        else:
+            z = torch.cat([z, torch.zeros(z.shape[0], AUDIO_DIM, device=z.device)], dim=1)
         x = self.project(z)                          # (B, 128*5*10)
         x = x.view(-1, 128, 5, 10)                  # (B, 128, 5, 10)
         x = self.deconv(x)                           # (B, VOCAB_SIZE, 40, 80)
@@ -185,8 +189,8 @@ class AsciiJEPA(nn.Module):
         # Predict next latent from context + audio
         predicted_latent = self.predictor(ctx_latents, audio)
 
-        # Decode predicted latent to glyph logits
-        decoded_logits = self.decoder(predicted_latent)
+        # Decode predicted latent + audio to glyph logits
+        decoded_logits = self.decoder(predicted_latent, audio)
 
         return predicted_latent, target_latent, decoded_logits
 
@@ -258,7 +262,16 @@ if __name__ == "__main__":
             l_pred = F.mse_loss(pred_lat, tgt_lat)
             l_decode = F.cross_entropy(logits, yb)
             l_sigreg = AsciiJEPA.variance_regularization(pred_lat)
-            loss = l_pred + l_decode + 0.1 * l_sigreg
+            # Audio contrastive: sometimes shuffle audio to force model to use it
+            if step % 3 == 0:
+                shuffled_ab = ab[torch.randperm(len(ab))]
+                with torch.no_grad():
+                    _, _, wrong_logits = model(xb, shuffled_ab)
+                l_contrast = -F.cross_entropy(wrong_logits, yb) * 0.1  # wrong audio should give worse output
+            else:
+                l_contrast = torch.tensor(0.0, device=device)
+
+            loss = l_pred + l_decode + 1.0 * l_sigreg + l_contrast
 
             opt.zero_grad()
             loss.backward()
@@ -311,24 +324,46 @@ if __name__ == "__main__":
     )
     print(f"Saved final checkpoint -> {args.checkpoint}")
 
-    # --- Quick sample: generate 5 frames autoregressively ---
-    print("\n=== Autoregressive Sample ===")
+    # --- Quick sample: generate frames with different audio contexts ---
+    print("\n=== Autoregressive Sample (varied audio) ===")
     model.eval()
     with torch.no_grad():
         # Seed from first 4 frames
         seed = frames[:4].to(device)  # (4, 40, 80)
         buf = [seed[i] for i in range(4)]  # list of (40, 80) on device
 
+        # Test with 3 scenarios: high energy, low energy, onset
+        scenarios = {
+            'high_energy': torch.tensor([[0.9]*2 + [0.9]*2 + [0.5]*2 + [0.0]*2 + [0.6]*2 + [0.5]*2 + [0.9]*2 + [0.0]*2], dtype=torch.float32),
+            'low_energy': torch.tensor([[0.05]*2 + [0.05]*2 + [0.05]*2 + [0.0]*2 + [0.3]*2 + [0.3]*2 + [0.05]*2 + [0.0]*2], dtype=torch.float32),
+            'onset_burst': torch.tensor([[0.5]*2 + [0.5]*2 + [0.5]*2 + [1.0]*2 + [0.6]*2 + [0.5]*2 + [0.8]*2 + [0.0]*2], dtype=torch.float32),
+        }
+        for scenario_name, aud_vec in scenarios.items():
+            print(f"\n=== {scenario_name} ===")
+            buf_sc = [seed[i] for i in range(4)]
+            for step in range(2):
+                ctx = torch.stack(buf_sc[-3:]).unsqueeze(0).to(device)
+                tgt_dummy = buf_sc[-1].unsqueeze(0).to(device)
+                inp = torch.cat([ctx, tgt_dummy.unsqueeze(1)], dim=1)
+                aud = aud_vec.to(device)
+
+                ctx_lats = torch.stack([model.encoder(inp[0, i].unsqueeze(0)) for i in range(3)], dim=1)
+                pred_lat = model.predictor(ctx_lats, aud)
+                logits = model.decoder(pred_lat, aud)
+                pred_frame = logits.argmax(dim=1)[0]
+                buf_sc.append(pred_frame)
+
+                from world_model.ascii_model.model import indices_to_frame
+                print(f"\n--- {scenario_name} Frame {step + 1} ---")
+                print(indices_to_frame(pred_frame.cpu().numpy()))
+
+        # Also original autoregressive
         for step in range(5):
-            ctx = torch.stack(buf[-3:]).unsqueeze(0).to(device)  # (1, 3, 40, 80)
-            tgt_dummy = buf[-1].unsqueeze(0).to(device)  # (1, 40, 80)
-            inp = torch.cat([ctx, tgt_dummy.unsqueeze(1)], dim=1)  # (1, 4, 40, 80)
-            aud = audio[4 + step].unsqueeze(0).to(device)  # (1, 16)
 
             # Encode context, predict next latent, decode
             ctx_lats = torch.stack([model.encoder(inp[0, i].unsqueeze(0)) for i in range(3)], dim=1)
             pred_lat = model.predictor(ctx_lats, aud)
-            logits = model.decoder(pred_lat)  # (1, V, 40, 80)
+            logits = model.decoder(pred_lat, aud)  # (1, V, 40, 80)
             pred_frame = logits.argmax(dim=1)[0]  # (40, 80) stays on device
             buf.append(pred_frame)
 
