@@ -316,8 +316,8 @@ if __name__ == "__main__":
     model.eval()
     with torch.no_grad():
         # Seed from first 4 frames
-        seed = frames[:4].unsqueeze(0).to(device)  # (1, 4, 40, 80)
-        buf = [seed[0, i] for i in range(4)]  # list of (40, 80)
+        seed = frames[:4].to(device)  # (4, 40, 80)
+        buf = [seed[i] for i in range(4)]  # list of (40, 80) on device
 
         for step in range(5):
             ctx = torch.stack(buf[-3:]).unsqueeze(0).to(device)  # (1, 3, 40, 80)
@@ -329,9 +329,9 @@ if __name__ == "__main__":
             ctx_lats = torch.stack([model.encoder(inp[0, i].unsqueeze(0)) for i in range(3)], dim=1)
             pred_lat = model.predictor(ctx_lats, aud)
             logits = model.decoder(pred_lat)  # (1, V, 40, 80)
-            pred_frame = logits.argmax(dim=1)[0].cpu()  # (40, 80)
+            pred_frame = logits.argmax(dim=1)[0]  # (40, 80) stays on device
             buf.append(pred_frame)
 
             from world_model.ascii_model.model import indices_to_frame
             print(f"\n--- Generated Frame {step + 1} ---")
-            print(indices_to_frame(pred_frame.numpy()))
+            print(indices_to_frame(pred_frame.cpu().numpy()))
