@@ -120,7 +120,7 @@ class AsciiFramePredictor(nn.Module):
         logits: (B, vocab_size, H, W)
     """
 
-    def __init__(self, embed_dim: int = 16, hidden: int = 64):
+    def __init__(self, embed_dim: int = 16, hidden: int = 128):
         super().__init__()
         self.embed = nn.Embedding(VOCAB_SIZE, embed_dim)
         in_channels = 2 * embed_dim  # 2 frames * embed_dim

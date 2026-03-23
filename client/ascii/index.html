@@ -40,10 +40,38 @@
     text-align: center;
     line-height: 1.8;
   }
+  #mode-btn {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 20;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85em;
+    background: transparent;
+    color: #33ffcc;
+    border: 1px solid #33ffcc;
+    padding: 6px 14px;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+  }
+  #mode-btn:hover { opacity: 1; }
+  #status {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 20;
+    font-family: 'Courier New', monospace;
+    font-size: 0.7em;
+    color: #33ffcc;
+    opacity: 0.5;
+  }
 </style>
 </head>
 <body>
 <pre id="frame"></pre>
+<button id="mode-btn" style="display:none">LOCAL</button>
+<div id="status" style="display:none"></div>
 <div id="overlay"><span>AURA ASCII Corridor<br><br>Click to start<br>(microphone required)</span></div>
 <script>
 // =========================================================================
@@ -494,6 +522,67 @@ async function init() {
 }
 
 document.getElementById('overlay').addEventListener('click', init);
+
+// =========================================================================
+// WebSocket AI Model Mode
+// =========================================================================
+let aiMode = false;
+let ws = null;
+const WS_URL = 'ws://localhost:8766/ws';
+const modeBtn = document.getElementById('mode-btn');
+const statusEl = document.getElementById('status');
+
+modeBtn.addEventListener('click', () => {
+  aiMode = !aiMode;
+  modeBtn.textContent = aiMode ? 'AI MODEL' : 'LOCAL';
+  modeBtn.style.borderColor = aiMode ? '#ff33cc' : '#33ffcc';
+  modeBtn.style.color = aiMode ? '#ff33cc' : '#33ffcc';
+  if (aiMode) {
+    connectWS();
+  } else {
+    if (ws) { ws.close(); ws = null; }
+    statusEl.textContent = '';
+  }
+});
+
+function connectWS() {
+  statusEl.textContent = 'connecting...';
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { statusEl.textContent = 'AI connected'; };
+  ws.onclose = () => {
+    statusEl.textContent = 'AI disconnected';
+    if (aiMode) setTimeout(connectWS, 2000);
+  };
+  ws.onerror = () => { statusEl.textContent = 'AI error — is server running?'; };
+  ws.onmessage = (e) => {
+    // Server sends plain text ASCII frame
+    document.getElementById('frame').textContent = e.data;
+  };
+}
+
+// Override tick to send audio to WS when in AI mode
+const _origTick = typeof tick === 'function' ? tick : null;
+const _aiTick = setInterval(() => {
+  if (!aiMode || !ws || ws.readyState !== WebSocket.OPEN || !running) return;
+  const features = extractFeatures();
+  if (features) {
+    ws.send(JSON.stringify({ audio: Array.from(features) }));
+  }
+}, 100); // 10 FPS
+
+// Show controls after init
+const _origInit = init;
+// Patch: show mode button after init completes
+setTimeout(() => {
+  const overlay = document.getElementById('overlay');
+  const origClick = overlay.onclick;
+  overlay.addEventListener('click', () => {
+    setTimeout(() => {
+      modeBtn.style.display = 'block';
+      statusEl.style.display = 'block';
+    }, 500);
+  }, { once: true });
+}, 0);
 </script>
 </body>
 </html>

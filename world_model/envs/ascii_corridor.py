@@ -595,11 +595,119 @@ def _run_live_curses(env, ctx, args):
     curses.wrapper(main)
 
 
+def _make_audio_context(
+    profile: str | None,
+    step_i: int,
+    n_steps: int,
+    rng: np.random.Generator,
+    prev_ctx: np.ndarray,
+) -> np.ndarray:
+    """Generate a 16-float audio context for one frame.
+
+    If *profile* is None, falls back to the original sweep-based generation.
+    Otherwise applies one of the named profiles:
+        high, low, ramp, pulse, random, sweep
+    """
+    ctx = np.zeros(16, dtype=np.float32)
+    t = step_i / max(n_steps, 1)
+
+    if profile is None:
+        # Legacy default: gentle audio sweep
+        ctx[0] = ctx[1] = rng.random() * 0.3 + 0.5 * np.sin(2 * np.pi * t * 2)
+        ctx[2] = ctx[3] = rng.random() * 0.2 + 0.3
+        ctx[4] = ctx[5] = 0.5 + 0.5 * np.sin(2 * np.pi * t * 3)
+        ctx[10] = ctx[11] = t
+        ctx[12] = ctx[13] = 0.3 + 0.4 * np.sin(2 * np.pi * t * 5)
+        if rng.random() < 0.05:
+            ctx[6] = ctx[7] = 0.9
+        else:
+            ctx[6] = ctx[7] = max(0, prev_ctx[6] - 0.15)
+
+    elif profile == 'high':
+        # All features 0.7-0.9, onsets 20% of frames
+        for pair_start in range(0, 14, 2):
+            val = rng.uniform(0.7, 0.9)
+            ctx[pair_start] = ctx[pair_start + 1] = val
+        # Onset: 20% fire probability
+        if rng.random() < 0.20:
+            ctx[6] = ctx[7] = rng.uniform(0.7, 0.95)
+        else:
+            ctx[6] = ctx[7] = rng.uniform(0.0, 0.05)
+
+    elif profile == 'low':
+        # All features 0.05-0.2, rare onsets
+        for pair_start in range(0, 14, 2):
+            val = rng.uniform(0.05, 0.2)
+            ctx[pair_start] = ctx[pair_start + 1] = val
+        # Onset: ~2% fire probability (rare)
+        if rng.random() < 0.02:
+            ctx[6] = ctx[7] = rng.uniform(0.3, 0.5)
+        else:
+            ctx[6] = ctx[7] = 0.0
+
+    elif profile == 'ramp':
+        # RMS ramps 0→1 over episode; other features scale proportionally
+        for pair_start in range(0, 14, 2):
+            base_noise = rng.uniform(-0.05, 0.05)
+            ctx[pair_start] = ctx[pair_start + 1] = t + base_noise
+        # RMS is the explicit ramp signal
+        ctx[12] = ctx[13] = t
+        # Onset scales with ramp
+        if rng.random() < t * 0.15:
+            ctx[6] = ctx[7] = rng.uniform(0.5, 0.9)
+        else:
+            ctx[6] = ctx[7] = 0.0
+
+    elif profile == 'pulse':
+        # Alternating high/low every 20 frames, onsets 20% during high
+        period = 20
+        is_high = (step_i // period) % 2 == 0
+        if is_high:
+            for pair_start in range(0, 14, 2):
+                ctx[pair_start] = ctx[pair_start + 1] = rng.uniform(0.7, 0.9)
+            if rng.random() < 0.20:
+                ctx[6] = ctx[7] = rng.uniform(0.7, 0.95)
+            else:
+                ctx[6] = ctx[7] = rng.uniform(0.0, 0.05)
+        else:
+            for pair_start in range(0, 14, 2):
+                ctx[pair_start] = ctx[pair_start + 1] = rng.uniform(0.05, 0.2)
+            ctx[6] = ctx[7] = 0.0
+
+    elif profile == 'random':
+        # Uniform random [0,1] for all features, onsets 20%
+        for pair_start in range(0, 14, 2):
+            ctx[pair_start] = ctx[pair_start + 1] = rng.uniform(0.0, 1.0)
+        if rng.random() < 0.20:
+            ctx[6] = ctx[7] = rng.uniform(0.5, 1.0)
+        else:
+            ctx[6] = ctx[7] = rng.uniform(0.0, 0.1)
+
+    elif profile == 'sweep':
+        # Temperature sweeps 0→1, bass sweeps 1→0 (opposite directions)
+        ctx[0] = ctx[1] = (1.0 - t) + rng.uniform(-0.03, 0.03)   # bass 1→0
+        ctx[2] = ctx[3] = rng.uniform(0.3, 0.5)                   # mid stable
+        ctx[4] = ctx[5] = 0.5 + 0.3 * np.sin(2 * np.pi * t * 4)  # high oscillates
+        ctx[6] = ctx[7] = 0.0                                      # onset off by default
+        ctx[8] = ctx[9] = rng.uniform(0.4, 0.6)                   # bpm stable
+        ctx[10] = ctx[11] = t + rng.uniform(-0.03, 0.03)          # temperature 0→1
+        ctx[12] = ctx[13] = 0.3 + 0.4 * t                         # rms rises gently
+        # Sparse onset
+        if rng.random() < 0.05:
+            ctx[6] = ctx[7] = rng.uniform(0.5, 0.8)
+
+    else:
+        raise ValueError(f'Unknown audio profile: {profile!r}')
+
+    return np.clip(ctx, 0.0, 1.0)
+
+
 def _run_generate(args):
     """Generate frames and write as JSONL or individual text files."""
+    steps = args.steps
     env = AsciiCorridorEnv(
         cols=args.cols, rows=args.rows, map_size=args.map_size,
-        max_steps=args.steps, render_mode='ansi',
+        max_steps=steps, render_mode='ansi',
     )
 
     output_path = Path(args.output)
@@ -612,29 +720,21 @@ def _run_generate(args):
     actions = [FORWARD, FORWARD, FORWARD, TURN_LEFT, TURN_RIGHT]
     frame_idx = 0
 
+    profile = getattr(args, 'audio_profile', None)
+
     jsonl_file = None
     if is_jsonl:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        jsonl_file = open(output_path, 'w', encoding='utf-8')
+        mode = 'a' if getattr(args, 'append', False) else 'w'
+        jsonl_file = open(output_path, mode, encoding='utf-8')
 
     try:
         for ep in range(args.episodes):
             obs, _ = env.reset(seed=args.seed + ep if args.seed is not None else None)
             ctx = np.zeros(16, dtype=np.float32)
 
-            for step_i in range(args.steps):
-                # Audio sweep for variety
-                t = step_i / max(args.steps, 1)
-                ctx[0] = ctx[1] = rng.random() * 0.3 + 0.5 * np.sin(2 * np.pi * t * 2)
-                ctx[2] = ctx[3] = rng.random() * 0.2 + 0.3
-                ctx[4] = ctx[5] = 0.5 + 0.5 * np.sin(2 * np.pi * t * 3)
-                ctx[10] = ctx[11] = t
-                ctx[12] = ctx[13] = 0.3 + 0.4 * np.sin(2 * np.pi * t * 5)
-                if rng.random() < 0.05:
-                    ctx[6] = ctx[7] = 0.9
-                else:
-                    ctx[6] = ctx[7] = max(0, ctx[6] - 0.15)
-                ctx = np.clip(ctx, 0.0, 1.0)
+            for step_i in range(steps):
+                ctx = _make_audio_context(profile, step_i, steps, rng, ctx)
                 env.set_context(ctx)
 
                 action = rng.choice(actions, p=[0.5, 0.1, 0.1, 0.15, 0.15])
@@ -708,10 +808,16 @@ def main():
     gen.add_argument('--rows', type=int, default=40)
     gen.add_argument('--map-size', type=int, default=32)
     gen.add_argument('--episodes', type=int, default=5)
-    gen.add_argument('--steps', type=int, default=100)
+    gen.add_argument('--steps', '--steps-per-episode', type=int, default=100,
+                     dest='steps')
     gen.add_argument('--seed', type=int, default=42)
     gen.add_argument('--output', type=str, default='frames.jsonl',
                      help='Output path: .jsonl file or directory for .txt files')
+    gen.add_argument('--append', action='store_true',
+                     help='Append to output file instead of overwriting')
+    gen.add_argument('--audio-profile', type=str, default=None,
+                     choices=['high', 'low', 'ramp', 'pulse', 'random', 'sweep'],
+                     help='Audio context profile (overrides default sweep)')
 
     # ---- single frame (for quick test) ----
     single = sub.add_parser('frame', help='Print a single frame and exit')
