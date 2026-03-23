@@ -256,7 +256,22 @@ if __name__ == "__main__":
             ab = aud[idx].to(device)
             yb = tgt[idx].to(device)
 
-            pred_lat, tgt_lat, logits = model(xb, ab)
+            # AR rollout: after 60% of training, sometimes use model's own predictions
+            ar_active = epoch >= int(args.epochs * 0.6)
+            use_ar = ar_active and (step % 2 == 0)
+
+            if use_ar:
+                # Roll out: predict from context, use prediction as new context
+                model.eval()
+                with torch.no_grad():
+                    p_lat, _, p_logits = model(xb, ab)
+                    pred_frame = p_logits.argmax(dim=1)  # (B, 40, 80)
+                    # Build new input: shift context, append prediction
+                    ar_xb = torch.cat([xb[:, 1:], pred_frame.unsqueeze(1)], dim=1)
+                model.train()
+                pred_lat, tgt_lat, logits = model(ar_xb, ab)
+            else:
+                pred_lat, tgt_lat, logits = model(xb, ab)
 
             # Losses
             l_pred = F.mse_loss(pred_lat, tgt_lat)
