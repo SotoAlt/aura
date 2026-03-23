@@ -310,3 +310,28 @@ if __name__ == "__main__":
         args.checkpoint,
     )
     print(f"Saved final checkpoint -> {args.checkpoint}")
+
+    # --- Quick sample: generate 5 frames autoregressively ---
+    print("\n=== Autoregressive Sample ===")
+    model.eval()
+    with torch.no_grad():
+        # Seed from first 4 frames
+        seed = frames[:4].unsqueeze(0).to(device)  # (1, 4, 40, 80)
+        buf = [seed[0, i] for i in range(4)]  # list of (40, 80)
+
+        for step in range(5):
+            ctx = torch.stack(buf[-3:]).unsqueeze(0).to(device)  # (1, 3, 40, 80)
+            tgt_dummy = buf[-1].unsqueeze(0).to(device)  # (1, 40, 80)
+            inp = torch.cat([ctx, tgt_dummy.unsqueeze(1)], dim=1)  # (1, 4, 40, 80)
+            aud = audio[4 + step].unsqueeze(0).to(device)  # (1, 16)
+
+            # Encode context, predict next latent, decode
+            ctx_lats = torch.stack([model.encoder(inp[0, i].unsqueeze(0)) for i in range(3)], dim=1)
+            pred_lat = model.predictor(ctx_lats, aud)
+            logits = model.decoder(pred_lat)  # (1, V, 40, 80)
+            pred_frame = logits.argmax(dim=1)[0].cpu()  # (40, 80)
+            buf.append(pred_frame)
+
+            from world_model.ascii_model.model import indices_to_frame
+            print(f"\n--- Generated Frame {step + 1} ---")
+            print(indices_to_frame(pred_frame.numpy()))
