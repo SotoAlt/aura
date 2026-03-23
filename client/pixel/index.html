@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AURA — Audio World Model</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    width: 100vw;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    width: 100vmin;
+    height: 100vmin;
+  }
+  #overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.92);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    cursor: pointer;
+  }
+  #overlay h1 {
+    font-family: 'Helvetica Neue', sans-serif;
+    color: #fff;
+    font-size: 2.5em;
+    font-weight: 200;
+    letter-spacing: 0.3em;
+    margin-bottom: 0.5em;
+  }
+  #overlay p {
+    font-family: 'Helvetica Neue', sans-serif;
+    color: rgba(255,255,255,0.5);
+    font-size: 0.9em;
+    letter-spacing: 0.1em;
+  }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.65em;
+    color: rgba(255,255,255,0.4);
+    z-index: 5;
+    line-height: 1.6;
+  }
+  #status {
+    position: fixed;
+    bottom: 12px;
+    left: 12px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.6em;
+    color: rgba(255,255,255,0.3);
+    z-index: 5;
+  }
+  #audio-controls {
+    position: fixed;
+    bottom: 12px;
+    right: 12px;
+    z-index: 5;
+  }
+  #audio-controls label {
+    font-family: 'Courier New', monospace;
+    font-size: 0.65em;
+    color: rgba(255,255,255,0.4);
+    border: 1px solid rgba(255,255,255,0.2);
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  #audio-controls label:hover { color: rgba(255,255,255,0.8); border-color: rgba(255,255,255,0.5); }
+  #track-name {
+    font-family: 'Courier New', monospace;
+    font-size: 0.6em;
+    color: rgba(255,255,255,0.3);
+    margin-right: 8px;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" width="64" height="64"></canvas>
+<div id="hud"></div>
+<div id="status"></div>
+<div id="audio-controls" style="display:none">
+  <span id="track-name"></span>
+  <label>LOAD MUSIC <input type="file" id="audio-file" accept="audio/*" style="display:none"></label>
+</div>
+<div id="overlay">
+  <h1>A U R A</h1>
+  <p>audio-conditioned world model</p>
+  <p style="margin-top:2em;opacity:0.3">click to start — microphone or load music</p>
+</div>
+
+<script>
+// =========================================================================
+// AURA Pixel World Model — Pure Neural Hallucination
+// No rendering engine. The diffusion model IS the engine.
+// =========================================================================
+
+const WS_URL = 'ws://localhost:8765/ws';
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const hud = document.getElementById('hud');
+const statusEl = document.getElementById('status');
+
+let audioCtx, analyser, freqData, timeData;
+let ws = null;
+let running = false;
+let frameCount = 0;
+let lastFrameTime = 0;
+let fps = 0;
+
+// --- Audio Feature Extraction (same 16-float vector as Python) ---
+let prevSpectralFlux = 0;
+let emaState = new Float32Array(7);
+const EMA_ALPHA = 0.3;
+
+function bandEnergy(freqData, analyser, lowHz, highHz) {
+  const nyquist = audioCtx.sampleRate / 2;
+  const binCount = analyser.frequencyBinCount;
+  const lo = Math.floor(lowHz / nyquist * binCount);
+  const hi = Math.ceil(highHz / nyquist * binCount);
+  let sum = 0, count = 0;
+  for (let i = lo; i <= Math.min(hi, binCount - 1); i++) {
+    sum += freqData[i] / 255;
+    count++;
+  }
+  return count > 0 ? sum / count : 0;
+}
+
+function extractFeatures() {
+  if (!analyser) return null;
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  const bass = Math.min(1, bandEnergy(freqData, analyser, 20, 80) * 3);
+  const mid = Math.min(1, bandEnergy(freqData, analyser, 250, 2000) * 2.5);
+  const high = Math.min(1, bandEnergy(freqData, analyser, 4000, 20000) * 4);
+
+  // Onset via spectral flux
+  let flux = 0;
+  for (let i = 0; i < freqData.length; i++) {
+    const diff = (freqData[i] / 255) - prevSpectralFlux;
+    if (diff > 0) flux += diff;
+  }
+  prevSpectralFlux = freqData[0] / 255;
+  const onset = Math.min(1, flux / 50);
+
+  // RMS
+  let rmsSum = 0;
+  for (let i = 0; i < timeData.length; i++) {
+    const v = (timeData[i] - 128) / 128;
+    rmsSum += v * v;
+  }
+  const rms = Math.min(1, Math.sqrt(rmsSum / timeData.length) * 4);
+
+  // Spectral centroid
+  let weightedSum = 0, totalEnergy = 0;
+  for (let i = 0; i < freqData.length; i++) {
+    const e = freqData[i] / 255;
+    weightedSum += i * e;
+    totalEnergy += e;
+  }
+  const centroid = totalEnergy > 0 ? Math.min(1, (weightedSum / totalEnergy) / freqData.length * 2) : 0;
+
+  // BPM estimate (simple)
+  const bpm = 0.5;
+
+  // Raw values
+  const raw = [bass, mid, high, onset, bpm, centroid, rms];
+
+  // EMA smoothing
+  for (let i = 0; i < 7; i++) {
+    emaState[i] = EMA_ALPHA * raw[i] + (1 - EMA_ALPHA) * emaState[i];
+  }
+
+  // Interleave raw + EMA = 16 floats
+  const ctx16 = new Float32Array(16);
+  for (let i = 0; i < 7; i++) {
+    ctx16[i * 2] = raw[i];
+    ctx16[i * 2 + 1] = emaState[i];
+  }
+
+  return ctx16;
+}
+
+// --- WebSocket ---
+function connectWS() {
+  statusEl.textContent = 'connecting to model...';
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    statusEl.textContent = 'model connected — dreaming...';
+    sendAudio();
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'model disconnected — reconnecting...';
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = 'server not running — start: python -m world_model.infer --checkpoint diamond.ckpt';
+  };
+
+  ws.onmessage = (e) => {
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFrameTime > 1000) {
+      fps = frameCount / ((now - lastFrameTime) / 1000);
+      frameCount = 0;
+      lastFrameTime = now;
+    }
+
+    // Received frame — decode and draw
+    if (e.data instanceof ArrayBuffer) {
+      // JPEG or raw binary
+      const blob = new Blob([e.data], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, 64, 64);
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    }
+
+    // Send next audio context
+    if (running) sendAudio();
+  };
+}
+
+function sendAudio() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const features = extractFeatures();
+  if (features) {
+    ws.send(JSON.stringify({ audio: Array.from(features) }));
+    // Update HUD
+    hud.innerHTML =
+      `bass ${features[0].toFixed(2)}  mid ${features[2].toFixed(2)}  high ${features[4].toFixed(2)}<br>` +
+      `onset ${features[6].toFixed(2)}  rms ${features[12].toFixed(2)}  temp ${features[10].toFixed(2)}<br>` +
+      `${fps.toFixed(1)} fps — DIAMOND diffusion world model`;
+  }
+}
+
+// --- Init ---
+async function init() {
+  document.getElementById('overlay').remove();
+
+  // Start audio
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.7;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+  } catch (e) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    const osc = audioCtx.createOscillator();
+    osc.frequency.value = 0;
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0;
+    osc.connect(gain);
+    gain.connect(analyser);
+    osc.start();
+  }
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  timeData = new Uint8Array(analyser.fftSize);
+
+  // Audio file loader
+  document.getElementById('audio-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('track-name').textContent = file.name;
+    const buf = await audioCtx.decodeAudioData(await file.arrayBuffer());
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(analyser);
+    src.connect(audioCtx.destination);
+    src.start();
+  });
+  document.getElementById('audio-controls').style.display = 'block';
+
+  // Fill canvas black
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, 64, 64);
+
+  running = true;
+  lastFrameTime = performance.now();
+  connectWS();
+}
+
+document.getElementById('overlay').addEventListener('click', init);
+</script>
+</body>
+</html>
