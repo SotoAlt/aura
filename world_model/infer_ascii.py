@@ -88,7 +88,10 @@ def get_model():
         model = AsciiJEPA()
         model.load_state_dict(ckpt["model"])
     else:
-        model = AsciiFramePredictor()
+        # Auto-detect hidden size from checkpoint
+        conv1_shape = ckpt["model"].get("conv1.weight", None)
+        hidden = conv1_shape.shape[0] if conv1_shape is not None else 128
+        model = AsciiFramePredictor(hidden=hidden)
         model.load_state_dict(ckpt["model"])
 
     model = model.to(device).eval()
