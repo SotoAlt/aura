@@ -161,7 +161,7 @@ if __name__ == "__main__":
 
     d = np.load(args.data)
     frames = torch.from_numpy(d["frames"]).long()   # (N, 40, 80)
-    audio = torch.from_numpy(d["audio"]).float()     # (N, 16)
+    audio = torch.from_numpy(d["audios"]).float()    # (N, 16)
 
     # Build sequences: 4 context → 1 target
     ctx = torch.stack([frames[i-4:i] for i in range(4, len(frames))])
