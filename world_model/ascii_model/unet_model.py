@@ -169,7 +169,10 @@ if __name__ == "__main__":
     aud = audio[4:]
     print(f"Dataset: {len(ctx)} samples from {len(frames)} frames")
 
-    device = torch.device(args.device)
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
     model = AsciiUNet().to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"AsciiUNet: {n_params:,} parameters")
