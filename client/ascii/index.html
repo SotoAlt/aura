@@ -72,7 +72,13 @@
 <pre id="frame"></pre>
 <button id="mode-btn" style="display:none">LOCAL</button>
 <div id="status" style="display:none"></div>
-<div id="overlay"><span>AURA ASCII Corridor<br><br>Click to start<br>(microphone required)</span></div>
+<div id="audio-controls" style="position:fixed;bottom:12px;left:12px;z-index:20;display:none">
+  <label style="font-family:'Courier New',monospace;color:#33ffcc;font-size:0.7em;opacity:0.7;cursor:pointer;border:1px solid #33ffcc;padding:4px 10px">
+    LOAD MUSIC <input type="file" id="audio-file" accept="audio/*" style="display:none">
+  </label>
+  <span id="track-name" style="font-family:'Courier New',monospace;color:#33ffcc;font-size:0.65em;opacity:0.5;margin-left:8px"></span>
+</div>
+<div id="overlay"><span>AURA ASCII Corridor<br><br>Click to start<br>(allow microphone or load a song)</span></div>
 <script>
 // =========================================================================
 // AURA Browser ASCII Renderer — Demo Mode (JS Raycaster + Web Audio)
@@ -509,6 +515,21 @@ async function init() {
     freqData = new Uint8Array(analyser.frequencyBinCount);
     timeData = new Uint8Array(analyser.fftSize);
   }
+
+  // Audio file player — load a song and route it through the analyser
+  document.getElementById('audio-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('track-name').textContent = file.name;
+    const arrayBuf = await file.arrayBuffer();
+    const audioBuf = await audioCtx.decodeAudioData(arrayBuf);
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuf;
+    source.connect(analyser);
+    source.connect(audioCtx.destination); // play through speakers too
+    source.start();
+  });
+  document.getElementById('audio-controls').style.display = 'block';
 
   // Keyboard
   document.addEventListener('keydown', e => { keys[e.key] = true; });
