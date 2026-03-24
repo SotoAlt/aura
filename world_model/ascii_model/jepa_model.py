@@ -267,8 +267,9 @@ class AsciiJEPA(nn.Module):
             ctx_latents.append(self.encoder(ctx_frames[:, i]))
         ctx_latents = torch.stack(ctx_latents, dim=1)  # (B, 3, D)
 
-        # Encode target frame (stop-gradient)
-        target_latent = self.encoder(target_frame).detach()
+        # Encode target frame — NO stop-gradient (LeWM/LeJEPA: SIGReg prevents
+        # collapse without needing stop-grad or teacher-student)
+        target_latent = self.encoder(target_frame)
 
         # Predict next latent from context + audio
         predicted_latent = self.predictor(ctx_latents, audio)
