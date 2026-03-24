@@ -1,16 +1,18 @@
 """JEPA (Joint Embedding Predictive Architecture) for ASCII corridor frames.
 
-Adapts the LeWM concept for discrete glyph prediction:
+Aligned with LeWorldModel (le-wm.github.io):
   - GlyphEncoder: CNN embeds a 40x80 glyph grid into a 192-dim latent
-  - LatentPredictor: Transformer predicts next latent from 3 previous + audio
-  - GlyphDecoder: Transpose-CNN decodes latent back to glyph logits
-  - JEPA loss: MSE on latent prediction + CE on decoded frame + variance reg
+  - LatentPredictor: Transformer with AdaLN-zero audio conditioning per layer
+  - GlyphDecoder: Transpose-CNN decodes latent back to glyph logits (trained separately)
+  - Loss: L_pred + λ·SIGReg (2-term only, like LeWM)
+  - SIGReg: Epps-Pulley characteristic function test for isotropic Gaussian
 
 ~3-5M parameters, trains on CPU or GPU.
 """
 from __future__ import annotations
 
 import argparse
+import math
 import os
 
 import numpy as np
@@ -24,6 +26,91 @@ FRAME_H, FRAME_W = 40, 80
 CTX_FRAMES = 3
 AUDIO_DIM = 16
 LATENT_DIM = 192
+
+
+# ---------------------------------------------------------------------------
+# SIGReg — Sketched Isotropic Gaussian Regularizer (from LeWM)
+# ---------------------------------------------------------------------------
+
+class SIGReg(nn.Module):
+    """Epps-Pulley characteristic function test for isotropic Gaussian.
+
+    Projects embeddings onto random directions and compares the empirical
+    characteristic function against exp(-t²/2). Much stronger than simple
+    variance regularization — enforces full Gaussian structure.
+    """
+
+    def __init__(self, knots: int = 17, num_proj: int = 512):
+        super().__init__()
+        self.num_proj = num_proj
+        t = torch.linspace(0, 3, knots, dtype=torch.float32)
+        dt = 3 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """z: (B, D) — batch of latent embeddings."""
+        if z.dim() == 2:
+            z = z.unsqueeze(0)  # (1, B, D) — add time dim
+        # Random unit projections
+        A = torch.randn(z.size(-1), self.num_proj, device=z.device)
+        A = A.div_(A.norm(p=2, dim=0))
+        # Epps-Pulley statistic
+        x_t = (z @ A).unsqueeze(-1) * self.t  # (..., num_proj, knots)
+        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
+        statistic = (err @ self.weights) * z.size(-2)
+        return statistic.mean()
+
+
+# ---------------------------------------------------------------------------
+# AdaLN-Zero Transformer Block (from LeWM / DiT pattern)
+# ---------------------------------------------------------------------------
+
+class AdaLNBlock(nn.Module):
+    """Transformer block with AdaLN-zero conditioning.
+
+    The conditioning signal (audio) modulates LayerNorm params in each layer,
+    giving much deeper conditioning than FiLM on inputs alone.
+    """
+
+    def __init__(self, dim: int, n_heads: int, ff_dim: int, cond_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(dim, n_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, ff_dim), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(ff_dim, dim), nn.Dropout(dropout),
+        )
+        # AdaLN-zero: conditioning -> (scale1, shift1, gate1, scale2, shift2, gate2)
+        self.adaLN_mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cond_dim, 6 * dim),
+        )
+        # Initialize gate projections to zero for stable training
+        nn.init.zeros_(self.adaLN_mlp[-1].weight)
+        nn.init.zeros_(self.adaLN_mlp[-1].bias)
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor, mask=None):
+        """x: (B, S, D), c: (B, cond_dim)"""
+        params = self.adaLN_mlp(c).unsqueeze(1)  # (B, 1, 6*D)
+        s1, sh1, g1, s2, sh2, g2 = params.chunk(6, dim=-1)
+
+        # Attention with AdaLN
+        h = self.norm1(x) * (1 + s1) + sh1
+        h, _ = self.attn(h, h, h, attn_mask=mask, is_causal=(mask is not None))
+        x = x + g1 * h
+
+        # FFN with AdaLN
+        h = self.norm2(x) * (1 + s2) + sh2
+        h = self.ff(h)
+        x = x + g2 * h
+
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +141,7 @@ class GlyphEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# 2. LatentPredictor — Transformer over 3 latents + audio -> predicted next
+# 2. LatentPredictor — AdaLN-zero Transformer with audio in every layer
 # ---------------------------------------------------------------------------
 
 class LatentPredictor(nn.Module):
@@ -72,23 +159,20 @@ class LatentPredictor(nn.Module):
         self.latent_dim = latent_dim
         self.n_ctx = n_ctx
 
-        # Audio conditioning via FiLM-style: scale + shift per position
-        self.audio_mlp = nn.Sequential(
-            nn.Linear(audio_dim, 128), nn.ReLU(), nn.Linear(128, latent_dim * 2),
+        # Audio projection to conditioning dimension
+        self.audio_proj = nn.Sequential(
+            nn.Linear(audio_dim, 128), nn.SiLU(), nn.Linear(128, latent_dim),
         )
 
         # Learnable positional embeddings
         self.pos_embed = nn.Embedding(n_ctx, latent_dim)
 
-        # Transformer encoder with causal masking
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=latent_dim,
-            nhead=n_heads,
-            dim_feedforward=ff_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        # AdaLN-zero transformer blocks — audio conditions EVERY layer
+        self.blocks = nn.ModuleList([
+            AdaLNBlock(latent_dim, n_heads, ff_dim, latent_dim, dropout)
+            for _ in range(n_layers)
+        ])
+        self.final_norm = nn.LayerNorm(latent_dim)
 
         # Projection head for predicted latent
         self.head = nn.Linear(latent_dim, latent_dim)
@@ -101,24 +185,24 @@ class LatentPredictor(nn.Module):
         """
         B, S, D = latents.shape
 
-        # Audio conditioning: FiLM modulation on each latent
-        audio_params = self.audio_mlp(audio)         # (B, 2*D)
-        scale, shift = audio_params.chunk(2, dim=1)  # each (B, D)
-        scale = scale.unsqueeze(1)                   # (B, 1, D)
-        shift = shift.unsqueeze(1)                   # (B, 1, D)
-        x = latents * (1.0 + scale) + shift
+        # Audio conditioning vector
+        c = self.audio_proj(audio)  # (B, latent_dim)
 
         # Add positional embeddings
-        positions = torch.arange(S, device=x.device)
-        x = x + self.pos_embed(positions).unsqueeze(0)
+        positions = torch.arange(S, device=latents.device)
+        x = latents + self.pos_embed(positions).unsqueeze(0)
 
-        # Causal mask: each position attends only to itself and earlier
+        # Causal mask
         mask = nn.Transformer.generate_square_subsequent_mask(S, device=x.device)
 
-        x = self.transformer(x, mask=mask, is_causal=True)
+        # Pass through AdaLN-zero blocks — audio modulates every layer
+        for block in self.blocks:
+            x = block(x, c, mask=mask)
+
+        x = self.final_norm(x)
 
         # Take last position as prediction
-        pred = self.head(x[:, -1])                   # (B, D)
+        pred = self.head(x[:, -1])  # (B, D)
         return pred
 
 
@@ -194,25 +278,30 @@ class AsciiJEPA(nn.Module):
 
         return predicted_latent, target_latent, decoded_logits
 
+    # Keep backward compat alias
     @staticmethod
     def variance_regularization(latents: torch.Tensor, min_std: float = 0.1) -> torch.Tensor:
-        """Soft penalty if per-dimension std drops below min_std."""
-        std = latents.std(dim=0)                      # (D,)
+        """Legacy — use SIGReg instead."""
+        std = latents.std(dim=0)
         penalty = F.relu(min_std - std).pow(2).mean()
         return penalty
 
 
 # ---------------------------------------------------------------------------
-# 5. Training script
+# 5. Training script — 2-phase like LeWM
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    pa = argparse.ArgumentParser(description="Train AsciiJEPA")
+    pa = argparse.ArgumentParser(description="Train AsciiJEPA (LeWM-aligned)")
     pa.add_argument("--data", default="data/ascii_training.npz")
     pa.add_argument("--epochs", type=int, default=20)
     pa.add_argument("--batch-size", type=int, default=32)
     pa.add_argument("--checkpoint", default="checkpoints/ascii_jepa.pt")
     pa.add_argument("--device", default="cpu")
+    pa.add_argument("--sigreg-lambda", type=float, default=10.0,
+                    help="SIGReg weight (LeWM default ~10)")
+    pa.add_argument("--decoder-phase-frac", type=float, default=0.3,
+                    help="Last 30%% of epochs: freeze JEPA, train decoder only")
     args = pa.parse_args()
 
     # --- Load data ---
@@ -239,16 +328,36 @@ if __name__ == "__main__":
         device = torch.device(args.device)
 
     model = AsciiJEPA().to(device)
+    sigreg = SIGReg().to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"AsciiJEPA: {n_params:,} parameters on {device}")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    bs = args.batch_size
+    # Phase boundary
+    jepa_epochs = int(args.epochs * (1 - args.decoder_phase_frac))
+    decoder_start = jepa_epochs
+    print(f"Phase 1 (JEPA): epochs 1-{jepa_epochs}  |  "
+          f"Phase 2 (decoder): epochs {jepa_epochs + 1}-{args.epochs}")
 
+    # Separate optimizers for 2-phase training
+    jepa_params = list(model.encoder.parameters()) + list(model.predictor.parameters())
+    decoder_params = list(model.decoder.parameters())
+    opt_jepa = torch.optim.AdamW(jepa_params, lr=1e-3)
+    opt_decoder = torch.optim.AdamW(decoder_params, lr=1e-3)
+
+    bs = args.batch_size
     step = 0
+
     for epoch in range(args.epochs):
         perm = torch.randperm(len(seq))
         e_pred, e_dec, e_reg, e_correct, e_total = 0.0, 0.0, 0.0, 0, 0
+        phase2 = epoch >= decoder_start
+
+        if phase2 and epoch == decoder_start:
+            print("\n=== Phase 2: Freeze encoder+predictor, train decoder ===")
+            model.encoder.eval()
+            model.predictor.eval()
+            for p in jepa_params:
+                p.requires_grad_(False)
 
         for i in range(0, len(seq), bs):
             idx = perm[i : i + bs]
@@ -256,46 +365,54 @@ if __name__ == "__main__":
             ab = aud[idx].to(device)
             yb = tgt[idx].to(device)
 
-            # AR rollout: after 60% of training, sometimes use model's own predictions
-            ar_active = epoch >= int(args.epochs * 0.6)
+            # AR rollout: in JEPA phase after 60%, in decoder phase always
+            ar_active = (not phase2 and epoch >= int(jepa_epochs * 0.6)) or phase2
             use_ar = ar_active and (step % 2 == 0)
 
             if use_ar:
-                # Roll out: predict from context, use prediction as new context
                 model.eval()
                 with torch.no_grad():
                     p_lat, _, p_logits = model(xb, ab)
-                    pred_frame = p_logits.argmax(dim=1)  # (B, 40, 80)
-                    # Build new input: shift context, append prediction
+                    pred_frame = p_logits.argmax(dim=1)
                     ar_xb = torch.cat([xb[:, 1:], pred_frame.unsqueeze(1)], dim=1)
                 model.train()
+                if phase2:
+                    model.encoder.eval()
+                    model.predictor.eval()
                 pred_lat, tgt_lat, logits = model(ar_xb, ab)
             else:
                 pred_lat, tgt_lat, logits = model(xb, ab)
 
-            # Losses
-            l_pred = F.mse_loss(pred_lat, tgt_lat)
-            l_decode = F.cross_entropy(logits, yb)
-            l_sigreg = AsciiJEPA.variance_regularization(pred_lat)
-            # Audio contrastive: sometimes shuffle audio to force model to use it
-            if step % 3 == 0:
-                shuffled_ab = ab[torch.randperm(len(ab))]
+            if not phase2:
+                # Phase 1: L_pred + λ·SIGReg ONLY (no decoder loss!)
+                l_pred = F.mse_loss(pred_lat, tgt_lat)
+                l_sigreg = sigreg(pred_lat)
+                loss = l_pred + args.sigreg_lambda * l_sigreg
+
+                # Track decoder loss for logging only (no gradients)
                 with torch.no_grad():
-                    _, _, wrong_logits = model(xb, shuffled_ab)
-                l_contrast = -F.cross_entropy(wrong_logits, yb) * 0.1  # wrong audio should give worse output
+                    l_decode = F.cross_entropy(logits, yb)
+
+                opt_jepa.zero_grad()
+                loss.backward()
+                opt_jepa.step()
             else:
-                l_contrast = torch.tensor(0.0, device=device)
+                # Phase 2: L_decode ONLY (encoder+predictor frozen)
+                with torch.no_grad():
+                    l_pred = F.mse_loss(pred_lat, tgt_lat)
+                    l_sigreg = sigreg(pred_lat)
+                l_decode = F.cross_entropy(logits, yb)
+                loss = l_decode
 
-            loss = l_pred + l_decode + 1.0 * l_sigreg + l_contrast
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+                opt_decoder.zero_grad()
+                loss.backward()
+                opt_decoder.step()
 
             # Accuracy
-            preds = logits.argmax(dim=1)
-            correct = (preds == yb).sum().item()
-            total = yb.numel()
+            with torch.no_grad():
+                preds = logits.argmax(dim=1)
+                correct = (preds == yb).sum().item()
+                total = yb.numel()
 
             e_pred += l_pred.item() * len(idx)
             e_dec += l_decode.item() * len(idx)
@@ -305,20 +422,22 @@ if __name__ == "__main__":
             step += 1
 
             if step % 50 == 0:
+                phase_str = "DEC" if phase2 else "JEPA"
                 print(
-                    f"  step {step:>5d}  "
+                    f"  [{phase_str}] step {step:>5d}  "
                     f"L_pred={l_pred.item():.4f}  "
                     f"L_dec={l_decode.item():.4f}  "
-                    f"L_reg={l_sigreg.item():.4f}  "
+                    f"SIGReg={l_sigreg.item():.4f}  "
                     f"acc={correct / total * 100:.1f}%"
                 )
 
         n = len(seq)
+        phase_str = "DEC" if phase2 else "JEPA"
         print(
-            f"Epoch {epoch + 1}/{args.epochs}  "
+            f"[{phase_str}] Epoch {epoch + 1}/{args.epochs}  "
             f"L_pred={e_pred / n:.4f}  "
             f"L_dec={e_dec / n:.4f}  "
-            f"L_reg={e_reg / n:.4f}  "
+            f"SIGReg={e_reg / n:.4f}  "
             f"acc={e_correct / e_total * 100:.1f}%"
         )
 
@@ -326,7 +445,8 @@ if __name__ == "__main__":
         if (epoch + 1) % 5 == 0:
             os.makedirs(os.path.dirname(args.checkpoint) or ".", exist_ok=True)
             torch.save(
-                {"model": model.state_dict(), "vocab_size": VOCAB_SIZE, "epoch": epoch + 1},
+                {"model": model.state_dict(), "vocab_size": VOCAB_SIZE,
+                 "epoch": epoch + 1, "phase": "decoder" if phase2 else "jepa"},
                 args.checkpoint,
             )
             print(f"  -> checkpoint saved: {args.checkpoint}")
@@ -343,11 +463,7 @@ if __name__ == "__main__":
     print("\n=== Autoregressive Sample (varied audio) ===")
     model.eval()
     with torch.no_grad():
-        # Seed from first 4 frames
-        seed = frames[:4].to(device)  # (4, 40, 80)
-        buf = [seed[i] for i in range(4)]  # list of (40, 80) on device
-
-        # Test with 3 scenarios: high energy, low energy, onset
+        seed = frames[:4].to(device)
         scenarios = {
             'high_energy': torch.tensor([[0.9]*2 + [0.9]*2 + [0.5]*2 + [0.0]*2 + [0.6]*2 + [0.5]*2 + [0.9]*2 + [0.0]*2], dtype=torch.float32),
             'low_energy': torch.tensor([[0.05]*2 + [0.05]*2 + [0.05]*2 + [0.0]*2 + [0.3]*2 + [0.3]*2 + [0.05]*2 + [0.0]*2], dtype=torch.float32),
@@ -355,33 +471,19 @@ if __name__ == "__main__":
         }
         for scenario_name, aud_vec in scenarios.items():
             print(f"\n=== {scenario_name} ===")
-            buf_sc = [seed[i] for i in range(4)]
-            for step in range(2):
-                ctx = torch.stack(buf_sc[-3:]).unsqueeze(0).to(device)
-                tgt_dummy = buf_sc[-1].unsqueeze(0).to(device)
+            buf = [seed[i] for i in range(4)]
+            for s in range(5):
+                ctx = torch.stack(buf[-3:]).unsqueeze(0).to(device)
+                tgt_dummy = buf[-1].unsqueeze(0).to(device)
                 inp = torch.cat([ctx, tgt_dummy.unsqueeze(1)], dim=1)
-                aud = aud_vec.to(device)
+                a = aud_vec.to(device)
 
-                ctx_lats = torch.stack([model.encoder(inp[0, i].unsqueeze(0)) for i in range(3)], dim=1)
-                pred_lat = model.predictor(ctx_lats, aud)
-                logits = model.decoder(pred_lat, aud)
+                ctx_lats = torch.stack([model.encoder(inp[0, j].unsqueeze(0)) for j in range(3)], dim=1)
+                pred_lat = model.predictor(ctx_lats, a)
+                logits = model.decoder(pred_lat, a)
                 pred_frame = logits.argmax(dim=1)[0]
-                buf_sc.append(pred_frame)
+                buf.append(pred_frame)
 
                 from world_model.ascii_model.model import indices_to_frame
-                print(f"\n--- {scenario_name} Frame {step + 1} ---")
+                print(f"\n--- {scenario_name} Frame {s + 1} ---")
                 print(indices_to_frame(pred_frame.cpu().numpy()))
-
-        # Also original autoregressive
-        for step in range(5):
-
-            # Encode context, predict next latent, decode
-            ctx_lats = torch.stack([model.encoder(inp[0, i].unsqueeze(0)) for i in range(3)], dim=1)
-            pred_lat = model.predictor(ctx_lats, aud)
-            logits = model.decoder(pred_lat, aud)  # (1, V, 40, 80)
-            pred_frame = logits.argmax(dim=1)[0]  # (40, 80) stays on device
-            buf.append(pred_frame)
-
-            from world_model.ascii_model.model import indices_to_frame
-            print(f"\n--- Generated Frame {step + 1} ---")
-            print(indices_to_frame(pred_frame.cpu().numpy()))
