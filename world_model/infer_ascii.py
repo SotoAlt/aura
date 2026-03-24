@@ -164,6 +164,13 @@ async def websocket_endpoint(ws: WebSocket):
 
             audio = torch.tensor([audio_list], dtype=torch.float32, device=device)  # (1, 16)
 
+            # Action: [forward, turn] from client WASD
+            action_list = msg.get("action")
+            if action_list and len(action_list) == 2:
+                action = torch.tensor([action_list], dtype=torch.float32, device=device)
+            else:
+                action = torch.zeros(1, 2, device=device)
+
             with torch.no_grad():
                 if model_type == "jepa":
                     # Encode last 3 frames -> predict latent -> decode
@@ -171,7 +178,7 @@ async def websocket_endpoint(ws: WebSocket):
                         [model.encoder(frame_buffer[-3 + i]) for i in range(3)],
                         dim=1,
                     )  # (1, 3, D)
-                    pred_latent = model.predictor(ctx_latents, audio)  # (1, D)
+                    pred_latent = model.predictor(ctx_latents, audio, action)  # (1, D)
                     logits = model.decoder(pred_latent, audio)  # (1, V, 40, 80)
                 else:
                     # Stack last 2 frames -> forward

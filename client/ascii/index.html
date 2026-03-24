@@ -581,13 +581,22 @@ function connectWS() {
   };
 }
 
-// Override tick to send audio to WS when in AI mode
+// Override tick to send audio + action to WS when in AI mode
 const _origTick = typeof tick === 'function' ? tick : null;
 const _aiTick = setInterval(() => {
   if (!aiMode || !ws || ws.readyState !== WebSocket.OPEN || !running) return;
   const features = extractFeatures();
   if (features) {
-    ws.send(JSON.stringify({ audio: Array.from(features) }));
+    // Read WASD state as continuous action [forward, turn]
+    let forward = 0, turn = 0;
+    if (keys['ArrowUp']   || keys['w'] || keys['W']) forward =  1;
+    if (keys['ArrowDown'] || keys['s'] || keys['S']) forward = -1;
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) turn    = -1;
+    if (keys['ArrowRight']|| keys['d'] || keys['D']) turn    =  1;
+    ws.send(JSON.stringify({
+      audio: Array.from(features),
+      action: [forward, turn]
+    }));
   }
 }, 100); // 10 FPS
 

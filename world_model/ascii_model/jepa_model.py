@@ -25,6 +25,8 @@ from world_model.ascii_model.model import VOCAB_SIZE
 FRAME_H, FRAME_W = 40, 80
 CTX_FRAMES = 3
 AUDIO_DIM = 16
+ACTION_DIM = 2  # [forward, turn]
+COND_DIM = AUDIO_DIM + ACTION_DIM  # 18 total conditioning
 LATENT_DIM = 192
 
 
@@ -73,8 +75,8 @@ class SIGReg(nn.Module):
 class AdaLNBlock(nn.Module):
     """Transformer block with AdaLN-zero conditioning.
 
-    The conditioning signal (audio) modulates LayerNorm params in each layer,
-    giving much deeper conditioning than FiLM on inputs alone.
+    The conditioning signal (audio+action) modulates LayerNorm params in each
+    layer, giving much deeper conditioning than FiLM on inputs alone.
     """
 
     def __init__(self, dim: int, n_heads: int, ff_dim: int, cond_dim: int, dropout: float = 0.1):
@@ -148,7 +150,7 @@ class LatentPredictor(nn.Module):
     def __init__(
         self,
         latent_dim: int = LATENT_DIM,
-        audio_dim: int = AUDIO_DIM,
+        cond_dim: int = COND_DIM,
         n_ctx: int = CTX_FRAMES,
         n_heads: int = 4,
         n_layers: int = 4,
@@ -159,15 +161,15 @@ class LatentPredictor(nn.Module):
         self.latent_dim = latent_dim
         self.n_ctx = n_ctx
 
-        # Audio projection to conditioning dimension
-        self.audio_proj = nn.Sequential(
-            nn.Linear(audio_dim, 128), nn.SiLU(), nn.Linear(128, latent_dim),
+        # Conditioning projection: audio(16) + action(2) -> latent_dim
+        self.cond_proj = nn.Sequential(
+            nn.Linear(cond_dim, 128), nn.SiLU(), nn.Linear(128, latent_dim),
         )
 
         # Learnable positional embeddings
         self.pos_embed = nn.Embedding(n_ctx, latent_dim)
 
-        # AdaLN-zero transformer blocks — audio conditions EVERY layer
+        # AdaLN-zero transformer blocks — audio+action conditions EVERY layer
         self.blocks = nn.ModuleList([
             AdaLNBlock(latent_dim, n_heads, ff_dim, latent_dim, dropout)
             for _ in range(n_layers)
@@ -177,16 +179,27 @@ class LatentPredictor(nn.Module):
         # Projection head for predicted latent
         self.head = nn.Linear(latent_dim, latent_dim)
 
-    def forward(self, latents: torch.Tensor, audio: torch.Tensor) -> torch.Tensor:
+    def forward(self, latents: torch.Tensor, audio: torch.Tensor,
+                action: torch.Tensor = None) -> torch.Tensor:
         """
         latents: (B, n_ctx, latent_dim)
         audio:   (B, audio_dim)
+        action:  (B, action_dim) or None — [forward, turn]
         returns: (B, latent_dim) predicted next latent
         """
         B, S, D = latents.shape
 
-        # Audio conditioning vector
-        c = self.audio_proj(audio)  # (B, latent_dim)
+        # Build conditioning: concat audio + action
+        if action is not None:
+            cond_input = torch.cat([audio, action], dim=1)  # (B, 18)
+        else:
+            # Backward compat: no action = stand still
+            cond_input = torch.cat([
+                audio,
+                torch.zeros(B, ACTION_DIM, device=audio.device)
+            ], dim=1)  # (B, 18)
+
+        c = self.cond_proj(cond_input)  # (B, latent_dim)
 
         # Add positional embeddings
         positions = torch.arange(S, device=latents.device)
@@ -256,7 +269,8 @@ class AsciiJEPA(nn.Module):
         self.predictor = LatentPredictor(latent_dim=latent_dim)
         self.decoder = GlyphDecoder(latent_dim=latent_dim)
 
-    def forward(self, frames_seq: torch.Tensor, audio: torch.Tensor):
+    def forward(self, frames_seq: torch.Tensor, audio: torch.Tensor,
+                action: torch.Tensor = None):
         B = frames_seq.shape[0]
         ctx_frames = frames_seq[:, :CTX_FRAMES]      # (B, 3, 40, 80)
         target_frame = frames_seq[:, CTX_FRAMES]      # (B, 40, 80)
@@ -271,8 +285,8 @@ class AsciiJEPA(nn.Module):
         # collapse without needing stop-grad or teacher-student)
         target_latent = self.encoder(target_frame)
 
-        # Predict next latent from context + audio
-        predicted_latent = self.predictor(ctx_latents, audio)
+        # Predict next latent from context + audio + action
+        predicted_latent = self.predictor(ctx_latents, audio, action)
 
         # Decode predicted latent + audio to glyph logits
         decoded_logits = self.decoder(predicted_latent, audio)
@@ -309,13 +323,30 @@ if __name__ == "__main__":
     d = np.load(args.data)
     frames = torch.from_numpy(d["frames"]).long()     # (N, 40, 80)
     audio = torch.from_numpy(d["audios"]).float()      # (N, 16)
+    has_actions = "actions" in d
+    if has_actions:
+        actions = torch.from_numpy(d["actions"]).float()  # (N, 2)
+        episodes = d.get("episodes", None)
+    else:
+        actions = torch.zeros(len(frames), ACTION_DIM)
+        episodes = None
 
-    # Build 4-frame windows: frames[i-3:i+1] as (3 ctx + 1 target)
+    # Build 4-frame windows respecting episode boundaries
     n_ctx = CTX_FRAMES
-    seq = torch.stack([frames[i - n_ctx : i + 1] for i in range(n_ctx, len(frames))])
-    aud = audio[n_ctx:]
-    tgt = frames[n_ctx:]
-    print(f"Dataset: {len(seq)} samples from {len(frames)} frames")
+    valid_indices = []
+    for i in range(n_ctx, len(frames)):
+        # If we have episode info, skip cross-episode windows
+        if episodes is not None and episodes[i] != episodes[i - n_ctx]:
+            continue
+        valid_indices.append(i)
+    valid_indices = torch.tensor(valid_indices)
+
+    seq = torch.stack([frames[i - n_ctx : i + 1] for i in valid_indices])
+    aud = audio[valid_indices]
+    act = actions[valid_indices]  # action that produced frame[i]
+    tgt = frames[valid_indices]
+    print(f"Dataset: {len(seq)} samples from {len(frames)} frames"
+          f" (actions={'yes' if has_actions else 'no'})")
 
     # --- Device ---
     if args.device == "auto":
@@ -364,6 +395,7 @@ if __name__ == "__main__":
             idx = perm[i : i + bs]
             xb = seq[idx].to(device)
             ab = aud[idx].to(device)
+            actb = act[idx].to(device)
             yb = tgt[idx].to(device)
 
             # AR rollout: in JEPA phase after 60%, in decoder phase always
@@ -373,16 +405,16 @@ if __name__ == "__main__":
             if use_ar:
                 model.eval()
                 with torch.no_grad():
-                    p_lat, _, p_logits = model(xb, ab)
+                    p_lat, _, p_logits = model(xb, ab, actb)
                     pred_frame = p_logits.argmax(dim=1)
                     ar_xb = torch.cat([xb[:, 1:], pred_frame.unsqueeze(1)], dim=1)
                 model.train()
                 if phase2:
                     model.encoder.eval()
                     model.predictor.eval()
-                pred_lat, tgt_lat, logits = model(ar_xb, ab)
+                pred_lat, tgt_lat, logits = model(ar_xb, ab, actb)
             else:
-                pred_lat, tgt_lat, logits = model(xb, ab)
+                pred_lat, tgt_lat, logits = model(xb, ab, actb)
 
             if not phase2:
                 # Phase 1: L_pred + λ·SIGReg ONLY (no decoder loss!)
