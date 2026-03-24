@@ -184,7 +184,13 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_json({'error': 'Expected "audio" array of 16 floats'})
                 continue
 
-            audio = torch.tensor([audio_list], dtype=torch.float32, device=device)  # (1, 16)
+            audio_raw = torch.tensor([audio_list], dtype=torch.float32, device=device)  # (1, 16)
+            # Amplify audio signal for stronger visual response
+            # Boost contrast of audio features — push highs higher, lows lower
+            audio = (audio_raw * 2.0).clamp(0, 1)  # 2x amplification
+            # Extra boost on bass (idx 0-1) and RMS (idx 12-13) for structural effects
+            audio[0, 0:2] = (audio_raw[0, 0:2] * 3.0).clamp(0, 1)
+            audio[0, 12:14] = (audio_raw[0, 12:14] * 3.0).clamp(0, 1)
 
             # ---- Optional: client overrides output format -------------
             fmt = msg.get('format')
