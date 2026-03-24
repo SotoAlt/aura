@@ -272,12 +272,13 @@ class AsciiJEPA(nn.Module):
     def forward(self, frames_seq: torch.Tensor, audio: torch.Tensor,
                 action: torch.Tensor = None):
         B = frames_seq.shape[0]
-        ctx_frames = frames_seq[:, :CTX_FRAMES]      # (B, 3, 40, 80)
-        target_frame = frames_seq[:, CTX_FRAMES]      # (B, 40, 80)
+        n_ctx = frames_seq.shape[1] - 1  # dynamic context length
+        ctx_frames = frames_seq[:, :n_ctx]             # (B, n_ctx, 40, 80)
+        target_frame = frames_seq[:, n_ctx]             # (B, 40, 80)
 
         # Encode each context frame
         ctx_latents = []
-        for i in range(CTX_FRAMES):
+        for i in range(n_ctx):
             ctx_latents.append(self.encoder(ctx_frames[:, i]))
         ctx_latents = torch.stack(ctx_latents, dim=1)  # (B, 3, D)
 
@@ -317,7 +318,23 @@ if __name__ == "__main__":
                     help="SIGReg weight (LeWM default ~10)")
     pa.add_argument("--decoder-phase-frac", type=float, default=0.3,
                     help="Last 30%% of epochs: freeze JEPA, train decoder only")
+    pa.add_argument("--large", action="store_true",
+                    help="Use larger model: 256-dim latent, 6 transformer layers, wider encoder")
+    pa.add_argument("--ctx-frames", type=int, default=None,
+                    help="Override context frames (default: 3, or 5 with --large)")
     args = pa.parse_args()
+
+    # Large model config
+    if args.large:
+        LATENT_DIM_OVERRIDE = 256
+        N_LAYERS = 6
+        FF_DIM = 512
+        CTX_OVERRIDE = args.ctx_frames or 5
+    else:
+        LATENT_DIM_OVERRIDE = LATENT_DIM
+        N_LAYERS = 4
+        FF_DIM = 384
+        CTX_OVERRIDE = args.ctx_frames or CTX_FRAMES
 
     # --- Load data ---
     d = np.load(args.data)
@@ -331,16 +348,16 @@ if __name__ == "__main__":
         actions = torch.zeros(len(frames), ACTION_DIM)
         episodes = None
 
-    # Build 4-frame windows respecting episode boundaries
-    n_ctx = CTX_FRAMES
+    # Build context windows respecting episode boundaries
+    n_ctx = CTX_OVERRIDE
     valid_indices = []
     for i in range(n_ctx, len(frames)):
-        # If we have episode info, skip cross-episode windows
         if episodes is not None and episodes[i] != episodes[i - n_ctx]:
             continue
         valid_indices.append(i)
     valid_indices = torch.tensor(valid_indices)
 
+    # Window: n_ctx context + 1 target
     seq = torch.stack([frames[i - n_ctx : i + 1] for i in valid_indices])
     aud = audio[valid_indices]
     act = actions[valid_indices]  # action that produced frame[i]
@@ -359,7 +376,18 @@ if __name__ == "__main__":
     else:
         device = torch.device(args.device)
 
-    model = AsciiJEPA().to(device)
+    # Build model with config
+    encoder = GlyphEncoder(latent_dim=LATENT_DIM_OVERRIDE)
+    predictor = LatentPredictor(
+        latent_dim=LATENT_DIM_OVERRIDE, n_ctx=CTX_OVERRIDE,
+        n_layers=N_LAYERS, ff_dim=FF_DIM,
+    )
+    decoder = GlyphDecoder(latent_dim=LATENT_DIM_OVERRIDE)
+    model = AsciiJEPA(latent_dim=LATENT_DIM_OVERRIDE)
+    model.encoder = encoder
+    model.predictor = predictor
+    model.decoder = decoder
+    model = model.to(device)
     sigreg = SIGReg().to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"AsciiJEPA: {n_params:,} parameters on {device}")

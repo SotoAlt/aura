@@ -166,9 +166,31 @@ async def websocket_endpoint(ws: WebSocket):
     output_format = 'jpeg'     # default, client can override
 
     # Rolling buffer: list of (1, 3, H, W) float tensors in [-1, 1]
-    # Initialise with black frames (zeros = mid-gray in [-1,1] → use -1 for black)
-    black = torch.full((1, 3, H, W), -1.0, device=device)
-    frame_buffer = [black.clone() for _ in range(C)]
+    # Seed with real frames from training data if available
+    frame_buffer = None
+    for seed_path in ['/workspace/abstract_128', 'data/abstract_128']:
+        try:
+            from pathlib import Path
+            eps = sorted(Path(seed_path).glob('episode_*.npz'))
+            if eps:
+                ep = np.load(eps[len(eps)//2])
+                seed_imgs = ep['image'][:C]  # (C, H, W, 3) uint8
+                frame_buffer = []
+                for img in seed_imgs:
+                    if img.shape[0] != H or img.shape[1] != W:
+                        from PIL import Image
+                        img = np.array(Image.fromarray(img).resize((W, H)))
+                    t = torch.from_numpy(img).float().permute(2, 0, 1) / 127.5 - 1.0
+                    frame_buffer.append(t.unsqueeze(0).to(device))
+                logger.info('Seeded buffer with %d frames from %s', C, seed_path)
+                break
+        except Exception as e:
+            logger.debug('Seed from %s failed: %s', seed_path, e)
+            continue
+
+    if frame_buffer is None:
+        black = torch.full((1, 3, H, W), -1.0, device=device)
+        frame_buffer = [black.clone() for _ in range(C)]
 
     frame_count = 0
     t_start = time.monotonic()

@@ -465,14 +465,16 @@ function autoScale() {
 function tick() {
   if (!running) return;
   extractAudioFeatures();
-  handleMovement();
 
-  const { perpDist, hit, side } = raycast();
-  const asciiFrame = renderAscii(perpDist, hit, side);
-  const contextLine = formatContextLine(ctx16);
-
-  const el = document.getElementById('frame');
-  el.textContent = contextLine + '\n' + asciiFrame;
+  // In AI MODEL mode, skip local raycaster entirely — world model generates frames
+  if (!aiMode) {
+    handleMovement();
+    const { perpDist, hit, side } = raycast();
+    const asciiFrame = renderAscii(perpDist, hit, side);
+    const contextLine = formatContextLine(ctx16);
+    const el = document.getElementById('frame');
+    el.textContent = contextLine + '\n' + asciiFrame;
+  }
 
   setTimeout(tick, 1000 / TARGET_FPS);
 }
@@ -585,19 +587,18 @@ function connectWS() {
 const _origTick = typeof tick === 'function' ? tick : null;
 const _aiTick = setInterval(() => {
   if (!aiMode || !ws || ws.readyState !== WebSocket.OPEN || !running) return;
-  const features = extractFeatures();
-  if (features) {
-    // Read WASD state as continuous action [forward, turn]
-    let forward = 0, turn = 0;
-    if (keys['ArrowUp']   || keys['w'] || keys['W']) forward =  1;
-    if (keys['ArrowDown'] || keys['s'] || keys['S']) forward = -1;
-    if (keys['ArrowLeft'] || keys['a'] || keys['A']) turn    = -1;
-    if (keys['ArrowRight']|| keys['d'] || keys['D']) turn    =  1;
-    ws.send(JSON.stringify({
-      audio: Array.from(features),
-      action: [forward, turn]
-    }));
-  }
+  // extractAudioFeatures() writes to global ctx16, doesn't return
+  extractAudioFeatures();
+  // Read WASD state as continuous action [forward, turn]
+  let forward = 0, turn = 0;
+  if (keys['ArrowUp']   || keys['w'] || keys['W']) forward =  1;
+  if (keys['ArrowDown'] || keys['s'] || keys['S']) forward = -1;
+  if (keys['ArrowLeft'] || keys['a'] || keys['A']) turn    = -1;
+  if (keys['ArrowRight']|| keys['d'] || keys['D']) turn    =  1;
+  ws.send(JSON.stringify({
+    audio: Array.from(ctx16),
+    action: [forward, turn]
+  }));
 }, 100); // 10 FPS
 
 // Show controls after init

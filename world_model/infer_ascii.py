@@ -145,9 +145,25 @@ async def websocket_endpoint(ws: WebSocket):
         return
 
     # Rolling buffer of glyph-index frames: each (1, FRAME_H, FRAME_W) long
-    blank = torch.zeros(1, FRAME_H, FRAME_W, dtype=torch.long, device=device)
     ctx_len = 3 if model_type == "jepa" else 2
-    frame_buffer = [blank.clone() for _ in range(ctx_len)]
+
+    # Seed with real frames from training data if available
+    seed_frames = None
+    for seed_path in ["data/ascii_wm_v1.npz", "data/ascii_training_v2.npz"]:
+        try:
+            import numpy as np
+            sd = np.load(seed_path)
+            seed_frames = torch.from_numpy(sd["frames"][:ctx_len]).long().to(device)
+            logger.info("Seeded buffer with %d frames from %s", ctx_len, seed_path)
+            break
+        except Exception:
+            continue
+
+    if seed_frames is not None:
+        frame_buffer = [seed_frames[i:i+1] for i in range(ctx_len)]
+    else:
+        blank = torch.zeros(1, FRAME_H, FRAME_W, dtype=torch.long, device=device)
+        frame_buffer = [blank.clone() for _ in range(ctx_len)]
 
     frame_count = 0
     t_start = time.monotonic()
@@ -185,7 +201,14 @@ async def websocket_endpoint(ws: WebSocket):
                     prev = torch.cat(frame_buffer[-2:], dim=0).unsqueeze(0)  # (1, 2, H, W)
                     logits = model(prev, audio)  # (1, V, H, W)
 
-            pred_indices = logits.argmax(dim=1)  # (1, H, W)
+            # Temperature sampling to prevent AR collapse
+            temperature = 0.7
+            probs = torch.softmax(logits / temperature, dim=1)  # (1, V, H, W)
+            # Sample from distribution instead of argmax
+            B, V, H, W = probs.shape
+            pred_indices = torch.multinomial(
+                probs.permute(0, 2, 3, 1).reshape(-1, V), 1
+            ).reshape(B, H, W)  # (1, H, W)
             frame_text = indices_to_frame(pred_indices[0].cpu())
 
             # Update rolling buffer
