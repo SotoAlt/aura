@@ -50,6 +50,7 @@ def generate_episodes(
     all_actions = []
     all_audios = []
     all_episodes = []
+    all_states = []  # [pos_x, pos_y, angle] — scene state for renderer
 
     for ep in range(n_episodes):
         # Pick audio profile for this episode
@@ -62,6 +63,7 @@ def generate_episodes(
             style = movement_style
 
         obs, _ = env.reset(seed=seed + ep)
+        ep_map = env._map.copy()  # save map for this episode
         ctx = np.zeros(16, dtype=np.float32)
 
         for step_i in range(steps_per_ep):
@@ -105,10 +107,16 @@ def generate_episodes(
             # Convert ASCII frame to glyph indices
             frame_indices = frame_to_indices(obs["ascii"])
 
+            # Record scene state for renderer-based decoding
+            state_vec = np.array([
+                env._pos[0], env._pos[1], env._angle
+            ], dtype=np.float32)
+
             all_frames.append(frame_indices)
             all_actions.append(action_vec)
             all_audios.append(ctx.copy())
             all_episodes.append(ep)
+            all_states.append(state_vec)
 
             if done or truncated:
                 break
@@ -122,6 +130,7 @@ def generate_episodes(
         "actions": np.array(all_actions),   # (N, 2)
         "audios": np.array(all_audios),     # (N, 16)
         "episodes": np.array(all_episodes), # (N,)
+        "states": np.array(all_states),     # (N, 3) — [pos_x, pos_y, angle]
     }
 
 
