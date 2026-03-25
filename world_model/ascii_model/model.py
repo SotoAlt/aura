@@ -33,6 +33,9 @@ _ALL_GLYPHS = (
     "`'\"*"       # ceiling
     "✦✧★☆⚡✹✸"    # flash
     "▉▊▋▌"        # intense wall
+    "•●◉⬤"        # ball glyphs (bounce world)
+    "∙°˚"         # trail glyphs (bounce world)
+    "○╚╝"         # ball edge + corners (bounce world)
 )
 
 # Deduplicate while preserving order, then add UNKNOWN
