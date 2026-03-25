@@ -407,13 +407,27 @@ if __name__ == "__main__":
     bs = args.batch_size
     step = 0
 
+    # --- Class weights for decoder loss ---
+    # Count glyph frequencies in training data to compute inverse-frequency weights
+    glyph_counts = torch.bincount(tgt.reshape(-1), minlength=VOCAB_SIZE).float()
+    glyph_counts = glyph_counts.clamp(min=1)  # avoid div by zero
+    # Inverse frequency weighting, capped at 50x
+    class_weights = (glyph_counts.sum() / (VOCAB_SIZE * glyph_counts))
+    class_weights = class_weights.clamp(max=50.0).to(device)
+    # Print weight summary
+    top_glyphs = glyph_counts.argsort(descending=True)[:5]
+    print(f"Class weights: space(0)={class_weights[0]:.2f}, "
+          f"top rare: {[(int(g), f'{class_weights[g]:.1f}') for g in top_glyphs[-3:]]}")
+
     for epoch in range(args.epochs):
         perm = torch.randperm(len(seq))
-        e_pred, e_dec, e_reg, e_correct, e_total = 0.0, 0.0, 0.0, 0, 0
+        e_pred, e_dec, e_reg = 0.0, 0.0, 0.0
+        e_correct, e_total, e_ball_correct, e_ball_total = 0, 0, 0, 0
         phase2 = epoch >= decoder_start
 
         if phase2 and epoch == decoder_start:
             print("\n=== Phase 2: Freeze encoder+predictor, train decoder ===")
+            print("  Using class-weighted CE + multi-step AR rollouts")
             model.encoder.eval()
             model.predictor.eval()
             for p in jepa_params:
@@ -426,80 +440,111 @@ if __name__ == "__main__":
             actb = act[idx].to(device)
             yb = tgt[idx].to(device)
 
-            # AR rollout: in JEPA phase after 60%, in decoder phase always
-            ar_active = (not phase2 and epoch >= int(jepa_epochs * 0.6)) or phase2
-            use_ar = ar_active and (step % 2 == 0)
-
-            if use_ar:
-                model.eval()
-                with torch.no_grad():
-                    p_lat, _, p_logits = model(xb, ab, actb)
-                    pred_frame = p_logits.argmax(dim=1)
-                    ar_xb = torch.cat([xb[:, 1:], pred_frame.unsqueeze(1)], dim=1)
-                model.train()
-                if phase2:
-                    model.encoder.eval()
-                    model.predictor.eval()
-                pred_lat, tgt_lat, logits = model(ar_xb, ab, actb)
-            else:
-                pred_lat, tgt_lat, logits = model(xb, ab, actb)
-
             if not phase2:
-                # Phase 1: L_pred + λ·SIGReg ONLY (no decoder loss!)
+                # Phase 1: JEPA dynamics (L_pred + SIGReg)
+                # AR rollout after 60% of JEPA phase
+                ar_active = epoch >= int(jepa_epochs * 0.6)
+                use_ar = ar_active and (step % 2 == 0)
+
+                if use_ar:
+                    model.eval()
+                    with torch.no_grad():
+                        p_lat, _, p_logits = model(xb, ab, actb)
+                        pred_frame = p_logits.argmax(dim=1)
+                        ar_xb = torch.cat([xb[:, 1:], pred_frame.unsqueeze(1)], dim=1)
+                    model.train()
+                    pred_lat, tgt_lat, logits = model(ar_xb, ab, actb)
+                else:
+                    pred_lat, tgt_lat, logits = model(xb, ab, actb)
+
                 l_pred = F.mse_loss(pred_lat, tgt_lat)
                 l_sigreg = sigreg(pred_lat)
                 loss = l_pred + args.sigreg_lambda * l_sigreg
 
-                # Track decoder loss for logging only (no gradients)
                 with torch.no_grad():
-                    l_decode = F.cross_entropy(logits, yb)
+                    l_decode = F.cross_entropy(logits, yb, weight=class_weights)
 
                 opt_jepa.zero_grad()
                 loss.backward()
                 opt_jepa.step()
             else:
-                # Phase 2: L_decode ONLY (encoder+predictor frozen)
+                # Phase 2: Decoder with class-weighted CE + multi-step AR
+                # Multi-step AR rollout: predict → decode → re-encode → predict
+                # This teaches the decoder to work with the predictor's actual outputs
+                ar_steps = 3 if (step % 3 == 0) else 1
+                total_decode_loss = torch.tensor(0.0, device=device)
+
+                current_xb = xb
+                for ar_step in range(ar_steps):
+                    pred_lat, tgt_lat, logits = model(current_xb, ab, actb)
+
+                    # Class-weighted cross-entropy — rare glyphs matter more
+                    l_step = F.cross_entropy(logits, yb, weight=class_weights)
+                    total_decode_loss = total_decode_loss + l_step
+
+                    if ar_step < ar_steps - 1:
+                        # Decode → re-encode for next AR step
+                        with torch.no_grad():
+                            pred_frame = logits.argmax(dim=1)  # (B, H, W)
+                            current_xb = torch.cat(
+                                [current_xb[:, 1:], pred_frame.unsqueeze(1)], dim=1
+                            )
+
+                l_decode = total_decode_loss / ar_steps
+                loss = l_decode
+
                 with torch.no_grad():
                     l_pred = F.mse_loss(pred_lat, tgt_lat)
                     l_sigreg = sigreg(pred_lat)
-                l_decode = F.cross_entropy(logits, yb)
-                loss = l_decode
 
                 opt_decoder.zero_grad()
                 loss.backward()
                 opt_decoder.step()
 
-            # Accuracy
+            # Accuracy — overall + ball-specific
             with torch.no_grad():
                 preds = logits.argmax(dim=1)
                 correct = (preds == yb).sum().item()
                 total = yb.numel()
+                # Ball accuracy: non-space, non-wall glyphs
+                ball_mask = (yb != 0)  # everything that's not space
+                if ball_mask.any():
+                    ball_correct = (preds[ball_mask] == yb[ball_mask]).sum().item()
+                    ball_total = ball_mask.sum().item()
+                else:
+                    ball_correct, ball_total = 0, 0
 
             e_pred += l_pred.item() * len(idx)
             e_dec += l_decode.item() * len(idx)
             e_reg += l_sigreg.item() * len(idx)
             e_correct += correct
             e_total += total
+            e_ball_correct += ball_correct
+            e_ball_total += ball_total
             step += 1
 
             if step % 50 == 0:
-                phase_str = "DEC" if phase2 else "JEPA"
+                tag = "DEC" if phase2 else "JEPA"
+                ball_acc = e_ball_correct / max(e_ball_total, 1) * 100
                 print(
-                    f"  [{phase_str}] step {step:>5d}  "
+                    f"  [{tag}] step {step:>5d}  "
                     f"L_pred={l_pred.item():.4f}  "
                     f"L_dec={l_decode.item():.4f}  "
                     f"SIGReg={l_sigreg.item():.4f}  "
-                    f"acc={correct / total * 100:.1f}%"
+                    f"acc={correct / total * 100:.1f}%  "
+                    f"ball_acc={ball_acc:.1f}%"
                 )
 
         n = len(seq)
-        phase_str = "DEC" if phase2 else "JEPA"
+        tag = "DEC" if phase2 else "JEPA"
+        ball_acc = e_ball_correct / max(e_ball_total, 1) * 100
         print(
-            f"[{phase_str}] Epoch {epoch + 1}/{args.epochs}  "
+            f"[{tag}] Epoch {epoch + 1}/{args.epochs}  "
             f"L_pred={e_pred / n:.4f}  "
             f"L_dec={e_dec / n:.4f}  "
             f"SIGReg={e_reg / n:.4f}  "
-            f"acc={e_correct / e_total * 100:.1f}%"
+            f"acc={e_correct / e_total * 100:.1f}%  "
+            f"ball_acc={ball_acc:.1f}%"
         )
 
         # Save checkpoint every 5 epochs
