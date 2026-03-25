@@ -30,20 +30,17 @@ from world_model.ascii_model.jepa_model import (
     LATENT_DIM, AUDIO_DIM, ACTION_DIM, COND_DIM,
 )
 
-STATE_DIM = 19  # pos_x, pos_y, angle, audio_context(16)
-
-
 class StateDecoder(nn.Module):
-    """Decode latent → scene state parameters for the raycaster."""
+    """Decode latent → scene state parameters for the renderer."""
 
-    def __init__(self, latent_dim: int = LATENT_DIM):
+    def __init__(self, latent_dim: int = LATENT_DIM, state_dim: int = 21):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(latent_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, STATE_DIM),
+            nn.Linear(64, state_dim),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -59,14 +56,14 @@ class JEPAHybrid(nn.Module):
     """
 
     def __init__(self, latent_dim: int = LATENT_DIM, n_ctx: int = 3,
-                 n_layers: int = 4, ff_dim: int = 384):
+                 n_layers: int = 4, ff_dim: int = 384, state_dim: int = 21):
         super().__init__()
         self.encoder = GlyphEncoder(latent_dim=latent_dim)
         self.predictor = LatentPredictor(
             latent_dim=latent_dim, n_ctx=n_ctx,
             n_layers=n_layers, ff_dim=ff_dim,
         )
-        self.state_decoder = StateDecoder(latent_dim=latent_dim)
+        self.state_decoder = StateDecoder(latent_dim=latent_dim, state_dim=state_dim)
 
     def forward(self, frames_seq: torch.Tensor, audio: torch.Tensor,
                 action: torch.Tensor = None):
@@ -134,8 +131,10 @@ if __name__ == "__main__":
         print("Regenerate with updated generate_wm_data.py")
         raise SystemExit(1)
 
-    # Build state targets: [pos_x, pos_y, angle, audio(16)] = 19 floats
-    state_targets = torch.cat([states, audio], dim=1)  # (N, 19)
+    # Build state targets: [state_floats + audio(16)]
+    state_targets = torch.cat([states, audio], dim=1)
+    state_dim = state_targets.shape[1]
+    print(f"State dim: {state_dim} ({states.shape[1]} state + {audio.shape[1]} audio)")
 
     # Normalize state targets to [0, 1] range for stable training
     state_min = state_targets.min(dim=0).values
@@ -165,7 +164,8 @@ if __name__ == "__main__":
 
     # Model
     model = JEPAHybrid(latent_dim=lat_dim, n_ctx=n_ctx,
-                        n_layers=n_layers, ff_dim=ff_dim).to(device)
+                        n_layers=n_layers, ff_dim=ff_dim,
+                        state_dim=state_dim).to(device)
     sigreg = SIGReg().to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"JEPAHybrid: {n_params:,} params on {device}")
@@ -250,7 +250,8 @@ if __name__ == "__main__":
             torch.save({
                 "model": model.state_dict(),
                 "config": {"latent_dim": lat_dim, "n_ctx": n_ctx,
-                           "n_layers": n_layers, "ff_dim": ff_dim},
+                           "n_layers": n_layers, "ff_dim": ff_dim,
+                           "state_dim": state_dim},
                 "state_min": state_min, "state_max": state_max,
                 "state_range": state_range,
                 "epoch": epoch + 1,
