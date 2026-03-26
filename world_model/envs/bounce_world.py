@@ -85,20 +85,20 @@ class BounceWorld:
         temp = (audio[10] + audio[11]) / 2
         rms = (audio[12] + audio[13]) / 2
 
-        # Audio affects physics
-        self.gravity = 0.3 + bass * 1.2        # bass = heavier gravity
-        wind = (mid - 0.5) * 2.0               # mid = horizontal wind
-        self.vel_x += wind * 0.3
+        # Audio affects physics — tuned for balanced y-distribution
+        self.gravity = 0.15 + bass * 0.25       # lighter base gravity
+        wind = (mid - 0.5) * 0.3                # gentle horizontal wind
+        self.vel_x += wind * 0.1
 
-        # RMS (volume) = upward force — SCREAM TO LAUNCH
-        if rms > 0.3:
-            launch_force = (rms - 0.3) * 15.0
-            self.vel_y -= launch_force * 0.3   # up is negative y
+        # RMS (volume) = upward force — strong enough to counteract gravity
+        if rms > 0.15:
+            lift = (rms - 0.15) * 3.0
+            self.vel_y -= lift * 0.2             # upward push
 
-        # Onset (clap/beat) = instant kick
-        if onset > 0.4:
-            kick = onset * 8.0
-            self.vel_y -= kick
+        # Onset (clap/beat) = kick
+        if onset > 0.3:
+            kick = min(onset * 2.0, 1.5)
+            self.vel_y -= kick * 0.4
             # Spawn burst particles
             for _ in range(int(onset * 10)):
                 self.particles.append({
@@ -173,9 +173,10 @@ class BounceWorld:
         """Render current state as 40x80 ASCII art."""
         grid = [[BG_CHAR] * self.W for _ in range(self.H)]
 
-        # Floor
+        # Floor — thick, visible
         for x in range(self.W):
             grid[self.H - 1][x] = FLOOR_CHAR
+            grid[self.H - 2][x] = "─"  # double-thick floor
 
         # Walls
         for y in range(self.H):
@@ -187,6 +188,8 @@ class BounceWorld:
         grid[0][self.W - 1] = CORNER_CHARS[1]
         grid[self.H - 1][0] = CORNER_CHARS[2]
         grid[self.H - 1][self.W - 1] = CORNER_CHARS[3]
+        grid[self.H - 2][0] = WALL_CHAR
+        grid[self.H - 2][self.W - 1] = WALL_CHAR
 
         # Top wall
         for x in range(1, self.W - 1):
@@ -208,23 +211,27 @@ class BounceWorld:
 
         # Ball
         bx, by = int(self.ball_x), int(self.ball_y)
-        # Ball size based on audio high freq
-        ball_size = 1
+        # Ball — always visible, grows with volume
+        ball_size = 2  # minimum visible size
+        ball_glyph_idx = 2  # default ●
         if audio is not None:
-            high = (audio[4] + audio[5]) / 2
             rms = (audio[12] + audio[13]) / 2
-            ball_size = 1 + int(rms * 3)
-            ball_glyph_idx = min(len(BALL_GLYPHS) - 1, int(rms * len(BALL_GLYPHS)))
-        else:
-            ball_glyph_idx = 2
+            ball_size = 2 + int(rms * 4)
+            ball_glyph_idx = min(len(BALL_GLYPHS) - 1, 2 + int(rms * 2))
 
         ball_char = BALL_GLYPHS[ball_glyph_idx]
-        for dy in range(-ball_size + 1, ball_size):
-            for dx in range(-ball_size + 1, ball_size):
+        # Draw circular ball with edge shading
+        for dy in range(-ball_size, ball_size + 1):
+            for dx in range(-ball_size * 2, ball_size * 2 + 1):  # wider for char aspect ratio
                 px, py = bx + dx, by + dy
-                if 1 <= px < self.W - 1 and 1 <= py < self.H - 1:
-                    if dx * dx + dy * dy < ball_size * ball_size:
-                        grid[py][px] = ball_char
+                if 1 <= px < self.W - 1 and 1 <= py < self.H - 2:
+                    # Elliptical distance (chars are ~2x tall as wide)
+                    dist = (dx / 2.0) ** 2 + dy ** 2
+                    r2 = ball_size ** 2
+                    if dist < r2 * 0.5:
+                        grid[py][px] = ball_char  # core
+                    elif dist < r2:
+                        grid[py][px] = "○"  # edge
 
         # Audio meter bar at top
         if audio is not None:
