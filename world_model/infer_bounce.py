@@ -1,16 +1,21 @@
-"""AURA Bounce — One-shot launch, JEPA frame-prediction world model.
+"""AURA Bounce — Proper JEPA world model inference.
+
+JEPA predicts latent dynamics → state probe extracts ball physics →
+BounceWorld renders clean ASCII frames.
 
 Flow:
-  1. Client listens for a scream (volume threshold)
-  2. Sends ONE launch message with volume level
-  3. Server seeds with real physics frames, then JEPA imagines
-     ALL subsequent frames autoregressively — pure world model
-  4. Streams frames until ball settles or max frames reached
+  1. Client screams → sets initial audio context
+  2. Server encodes seed frames from real physics (the launch)
+  3. JEPA rolls out latent trajectory (sliding window of 3)
+  4. State probe decodes each latent → [ball_x, ball_y, vel_x, vel_y, gravity]
+  5. BounceWorld renders ASCII from predicted state
+  6. Streams frames to client until ball settles
 """
 import argparse
 import json
 import logging
 import time
+import asyncio
 
 import numpy as np
 import torch
@@ -18,61 +23,67 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from world_model.envs.bounce_world import BounceWorld
-from world_model.ascii_model.jepa_model import AsciiJEPA, GlyphEncoder, LatentPredictor, GlyphDecoder
-from world_model.ascii_model.model import frame_to_indices, indices_to_frame, VOCAB_SIZE
+from world_model.ascii_model.jepa_proper import JEPAWorldModel, StateProbe, EMBED_DIM, HISTORY_SIZE
+from world_model.ascii_model.model import frame_to_indices
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("aura.infer_bounce")
 
 _model = None
+_probe = None
 _device = None
 _checkpoint_path = None
-_n_ctx = None
+_state_mean = None
+_state_std = None
 
 
 def get_model():
-    global _model, _device, _n_ctx
+    global _model, _probe, _device, _state_mean, _state_std
     if _model is not None:
-        return _model, _device, _n_ctx
+        return _model, _probe, _device
 
     device = torch.device("cpu")
     _device = device
     logger.info("Loading from %s ...", _checkpoint_path)
     ckpt = torch.load(_checkpoint_path, map_location=device, weights_only=False)
 
-    # Detect model config from checkpoint
-    sd = ckpt["model"]
-    n_ctx = sd["predictor.pos_embed.weight"].shape[0]
-    lat_dim = sd["predictor.pos_embed.weight"].shape[1]
-    block_nums = set(int(k.split(".")[2]) for k in sd if k.startswith("predictor.blocks."))
-    n_layers = max(block_nums) + 1
-    ff_dim = sd["predictor.blocks.0.ff.0.weight"].shape[0]
-
-    logger.info("Detected: latent=%d, n_ctx=%d, n_layers=%d, ff_dim=%d",
-                lat_dim, n_ctx, n_layers, ff_dim)
-
-    model = AsciiJEPA(latent_dim=lat_dim)
-    model.encoder = GlyphEncoder(latent_dim=lat_dim)
-    model.predictor = LatentPredictor(latent_dim=lat_dim, n_ctx=n_ctx,
-                                       n_layers=n_layers, ff_dim=ff_dim)
-    model.decoder = GlyphDecoder(latent_dim=lat_dim)
-    model.load_state_dict(sd)
+    embed_dim = ckpt.get("embed_dim", EMBED_DIM)
+    model = JEPAWorldModel(embed_dim=embed_dim)
+    model.load_state_dict(ckpt["model"])
     model = model.to(device).eval()
     _model = model
-    _n_ctx = n_ctx
+
+    if "probe" in ckpt:
+        probe = StateProbe(embed_dim=embed_dim)
+        probe.load_state_dict(ckpt["probe"])
+        probe = probe.to(device).eval()
+        _probe = probe
+        _state_mean = ckpt["state_mean"].to(device)
+        _state_std = ckpt["state_std"].to(device)
+        logger.info("State probe loaded (mean=%s, std=%s)", _state_mean.tolist(), _state_std.tolist())
+    else:
+        logger.warning("No state probe in checkpoint — will use raw physics for rendering")
+        _probe = None
 
     n_params = sum(p.numel() for p in model.parameters())
-    logger.info("Loaded: %s params, 99.6%% accuracy bounce world model", f"{n_params:,}")
-    return _model, _device, _n_ctx
+    logger.info("Loaded: %s params, embed_dim=%d", f"{n_params:,}", embed_dim)
+    return _model, _probe, _device
 
 
-app = FastAPI(title="AURA Bounce World Model", version="0.3.0")
+app = FastAPI(title="AURA Bounce — Proper JEPA", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": _model is not None}
+    return {"status": "ok", "model_loaded": _model is not None, "probe_loaded": _probe is not None}
+
+
+def encode_frames(model, frames_list, device):
+    """Encode a list of (H,W) index tensors into JEPA embeddings."""
+    stacked = torch.stack(frames_list).unsqueeze(0).to(device)  # (1, T, H, W)
+    with torch.no_grad():
+        return model.encode(stacked)  # (1, T, D)
 
 
 @app.websocket("/ws")
@@ -81,9 +92,8 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info("Client connected")
 
     try:
-        model, device, n_ctx = get_model()
+        model, probe, device = get_model()
     except Exception as e:
-        logger.error("Load failed: %s", e)
         await ws.send_json({"error": str(e)})
         await ws.close(code=1011)
         return
@@ -97,7 +107,7 @@ async def websocket_endpoint(ws: WebSocket):
             mode = msg.get("mode", "listen")
 
             if mode == "listen":
-                # Show idle ball at bottom
+                # Idle: show ball at rest
                 renderer.reset(seed=42)
                 renderer.ball_x = renderer.W / 2
                 renderer.ball_y = renderer.H - 4
@@ -108,89 +118,110 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif mode == "launch":
                 volume = float(msg.get("volume", 0.5))
-                logger.info("LAUNCH! volume=%.2f — JEPA imagining physics...", volume)
+                logger.info("LAUNCH! vol=%.2f", volume)
 
-                # Create launch audio
+                # --- Generate seed frames with REAL physics ---
+                renderer.reset(seed=int(time.time()) % 10000)
+                renderer.ball_x = renderer.W / 2
+                renderer.ball_y = renderer.H - 4
+
                 launch_audio = np.zeros(16, dtype=np.float32)
                 launch_audio[12] = launch_audio[13] = volume
                 launch_audio[6] = launch_audio[7] = min(1.0, volume * 1.5)
                 launch_audio[0] = launch_audio[1] = volume * 0.8
                 zero_audio = np.zeros(16, dtype=np.float32)
 
-                # Generate seed frames using REAL physics
-                renderer.reset(seed=int(time.time()) % 10000)
-                renderer.ball_x = renderer.W / 2
-                renderer.ball_y = renderer.H - 4
+                seed_frames = []
+                seed_audios = []
+                n_seed = HISTORY_SIZE + 1  # 4 frames
 
-                seed_frame_indices = []
-                for i in range(n_ctx + 1):
+                for i in range(n_seed):
                     audio = launch_audio if i == 0 else zero_audio
                     renderer.step(audio)
                     frame_str = renderer.render_ascii(audio)
                     idx = frame_to_indices(frame_str)
                     if not isinstance(idx, torch.Tensor):
                         idx = torch.from_numpy(idx)
-                    seed_frame_indices.append(idx.long())
+                    seed_frames.append(idx.long())
+                    seed_audios.append(torch.tensor(audio))
 
-                    # Send seed frames to client
+                    # Send seed frames (from real physics)
                     await ws.send_text(json.dumps({
                         "type": "frame", "idx": i,
                         "frame": frame_str, "source": "physics"
                     }))
-                    import asyncio
                     await asyncio.sleep(0.08)
 
-                # Now: JEPA takes over — pure world model imagination
-                # Use FRAME buffer (not latent) — decode → re-encode each step
-                # This keeps predictions anchored to real frame representations
-                frame_buffer = list(seed_frame_indices[-n_ctx:])
-                zero_audio_t = torch.zeros(1, 16, device=device)
+                # --- JEPA latent rollout ---
+                with torch.no_grad():
+                    # Encode seed frames
+                    seed_tensor = torch.stack(seed_frames).unsqueeze(0).to(device)
+                    seed_emb = model.encode(seed_tensor)  # (1, 4, D)
 
-                max_frames = 150
-                for frame_i in range(max_frames):
-                    with torch.no_grad():
-                        # Encode context FRAMES (not latents) — re-encode every step
-                        ctx_frames = torch.stack(frame_buffer[-n_ctx:]).unsqueeze(0).to(device)
-                        ctx_lats = torch.stack(
-                            [model.encoder(ctx_frames[0, j].unsqueeze(0)) for j in range(n_ctx)],
-                            dim=1
-                        )
+                    seed_audio_tensor = torch.stack(seed_audios).unsqueeze(0).to(device)
+                    audio_flat = seed_audio_tensor.reshape(-1, 16)
+                    seed_audio_emb = model.audio_encoder(audio_flat).reshape(1, -1, EMBED_DIM)
 
-                        # Predict next latent + decode to frame
-                        pred_lat = model.predictor(ctx_lats, zero_audio_t)
-                        logits = model.decoder(pred_lat, zero_audio_t)
+                    emb_list = list(seed_emb[0].unbind(0))  # list of (D,)
+                    audio_emb_list = list(seed_audio_emb[0].unbind(0))
 
-                        # Argmax decode
-                        pred_indices = logits.argmax(dim=1)  # (1, H, W)
+                    # Roll out with zero audio (JEPA imagines physics)
+                    zero_a = torch.zeros(16, device=device)
+                    max_frames = 120
 
-                    # Convert to frame string
-                    frame_text = indices_to_frame(pred_indices[0].cpu().numpy())
+                    for frame_i in range(max_frames):
+                        # Sliding window: last 3 embeddings
+                        ctx = torch.stack(emb_list[-HISTORY_SIZE:]).unsqueeze(0)
+                        ctx_a = torch.stack(audio_emb_list[-HISTORY_SIZE:]).unsqueeze(0)
 
-                    # Update buffer
-                    frame_buffer.append(pred_indices[0].cpu())
-                    if len(frame_buffer) > n_ctx + 4:
-                        frame_buffer = frame_buffer[-(n_ctx + 2):]
+                        pred = model.predict_next(ctx, ctx_a)  # (1, D)
+                        emb_list.append(pred[0])
 
-                    # Send frame
-                    await ws.send_text(json.dumps({
-                        "type": "frame", "idx": len(seed_frame_indices) + frame_i,
-                        "frame": frame_text, "source": "jepa"
-                    }))
+                        # Encode zero audio for next step
+                        zero_a_emb = model.audio_encoder(zero_a.unsqueeze(0))[0]
+                        audio_emb_list.append(zero_a_emb)
 
-                    import asyncio
-                    await asyncio.sleep(0.08)
+                        # Decode state with probe
+                        if probe is not None:
+                            state_norm = probe(pred)  # (1, 5)
+                            state = state_norm[0] * _state_std + _state_mean
+                            state = state.cpu().numpy()
 
-                    # Check for new launch interrupt
-                    try:
-                        raw2 = await asyncio.wait_for(ws.receive_text(), timeout=0.001)
-                        msg2 = json.loads(raw2)
-                        if msg2.get("mode") == "launch":
+                            renderer.ball_x = float(np.clip(state[0] * renderer.W, 2, renderer.W - 3))
+                            renderer.ball_y = float(np.clip(state[1] * renderer.H, 2, renderer.H - 4))
+                            renderer.vel_x = float(state[2] * 10)
+                            renderer.vel_y = float(state[3] * 10)
+                            renderer.gravity = float(state[4] * 2)
+
+                        # Update trail
+                        renderer.trail.append((renderer.ball_x, renderer.ball_y))
+                        if len(renderer.trail) > 15:
+                            renderer.trail = renderer.trail[-15:]
+                        renderer.particles = []
+
+                        # Render and send
+                        frame_text = renderer.render_ascii(None)
+                        await ws.send_text(json.dumps({
+                            "type": "frame", "idx": n_seed + frame_i,
+                            "frame": frame_text, "source": "jepa"
+                        }))
+                        await asyncio.sleep(0.08)
+
+                        # Check settle
+                        if renderer.ball_y > renderer.H * 0.85 and abs(renderer.vel_y) < 0.5:
                             break
-                    except (asyncio.TimeoutError, Exception):
-                        pass
+
+                        # Check for new launch
+                        try:
+                            raw2 = await asyncio.wait_for(ws.receive_text(), timeout=0.001)
+                            msg2 = json.loads(raw2)
+                            if msg2.get("mode") == "launch":
+                                break
+                        except (asyncio.TimeoutError, Exception):
+                            pass
 
                 await ws.send_text(json.dumps({"type": "done"}))
-                logger.info("Imagination complete: %d frames", frame_i + 1)
+                logger.info("Done: %d JEPA frames", frame_i + 1)
 
     except WebSocketDisconnect:
         logger.info("Client disconnected")
@@ -208,7 +239,7 @@ def main():
     _checkpoint_path = args.checkpoint
 
     import uvicorn
-    logger.info("Starting AURA Bounce World Model on %s:%d", args.host, args.port)
+    logger.info("Starting AURA Bounce (Proper JEPA) on %s:%d", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
