@@ -32,7 +32,7 @@ FRAME_H, FRAME_W = 40, 80
 AUDIO_DIM = 16
 EMBED_DIM = 192
 HISTORY_SIZE = 3  # context window
-PROJ_HIDDEN = 1024  # projector MLP hidden (paper uses 2048 but we're smaller)
+PROJ_HIDDEN = 2048  # paper uses 2048
 
 
 # ---------------------------------------------------------------------------
@@ -85,31 +85,82 @@ class ProjectorMLP(nn.Module):
 # AdaLN-zero Transformer Block (from paper)
 # ---------------------------------------------------------------------------
 
+class Attention(nn.Module):
+    """Custom multi-head attention matching LeWM paper.
+
+    Paper uses heads=16, dim_head=64 → inner_dim=1024 for embed_dim=192.
+    This projects UP from 192 to 1024, does attention, projects back to 192.
+    PyTorch's nn.MultiheadAttention doesn't support this (inner_dim = embed_dim).
+    """
+
+    def __init__(self, dim, heads=16, dim_head=64, dropout=0.1):
+        super().__init__()
+        self.heads = heads
+        self.dim_head = dim_head
+        inner_dim = heads * dim_head  # 16 * 64 = 1024
+
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
+        self.to_out = nn.Linear(inner_dim, dim)
+        self.dropout = nn.Dropout(dropout)
+        self.scale = dim_head ** -0.5
+
+    def forward(self, x, causal=False):
+        """x: (B, T, D) → (B, T, D)"""
+        B, T, _ = x.shape
+        qkv = self.to_qkv(x).reshape(B, T, 3, self.heads, self.dim_head)
+        q, k, v = qkv.unbind(2)  # each (B, T, heads, dim_head)
+        q = q.transpose(1, 2)  # (B, heads, T, dim_head)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=causal,
+                                              dropout_p=self.dropout.p if self.training else 0.0)
+        out = out.transpose(1, 2).reshape(B, T, -1)  # (B, T, inner_dim)
+        return self.to_out(out)
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim), nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class ConditionalBlock(nn.Module):
-    def __init__(self, dim, n_heads, ff_dim, dropout=0.1):
+    """AdaLN-zero Transformer block matching LeWM paper.
+
+    Uses custom Attention with heads=16, dim_head=64 (inner_dim=1024)
+    and FFN with hidden_dim=2048. AdaLN-zero conditioning initialized to zero.
+    """
+
+    def __init__(self, dim, heads=16, dim_head=64, ff_dim=2048, dropout=0.1):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
-        self.attn = nn.MultiheadAttention(dim, n_heads, dropout=dropout, batch_first=True)
+        self.attn = Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
-        self.ff = nn.Sequential(
-            nn.Linear(dim, ff_dim), nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(ff_dim, dim), nn.Dropout(dropout),
-        )
+        self.ff = FeedForward(dim, ff_dim, dropout)
+
         # AdaLN-zero: 6 modulation params, initialized to zero
         self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
         nn.init.zeros_(self.adaLN[-1].weight)
         nn.init.zeros_(self.adaLN[-1].bias)
 
-    def forward(self, x, c, mask=None):
+    def forward(self, x, c, causal=False):
         """x: (B,T,D), c: (B,T,D) conditioning per position."""
         s1, sh1, g1, s2, sh2, g2 = self.adaLN(c).chunk(6, dim=-1)
-        # Attention
+
         h = self.norm1(x) * (1 + s1) + sh1
-        h, _ = self.attn(h, h, h, attn_mask=mask, is_causal=(mask is not None))
+        h = self.attn(h, causal=causal)
         x = x + g1 * h
-        # FFN
+
         h = self.norm2(x) * (1 + s2) + sh2
-        x = x + g2 * self.ff(h)
+        h = self.ff(h)
+        x = x + g2 * h
         return x
 
 
@@ -159,12 +210,18 @@ class AudioEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ARPredictor(nn.Module):
-    def __init__(self, embed_dim=EMBED_DIM, n_heads=8, n_layers=6,
-                 ff_dim=1024, dropout=0.1, max_len=HISTORY_SIZE):
+    """Autoregressive predictor matching LeWM paper.
+
+    Paper: depth=6, heads=16, dim_head=64, mlp_dim=2048, dropout=0.1
+    """
+
+    def __init__(self, embed_dim=EMBED_DIM, heads=16, dim_head=64, n_layers=6,
+                 ff_dim=2048, dropout=0.1, max_len=HISTORY_SIZE):
         super().__init__()
         self.pos_embed = nn.Parameter(torch.randn(1, max_len, embed_dim) * 0.02)
         self.blocks = nn.ModuleList([
-            ConditionalBlock(embed_dim, n_heads, ff_dim, dropout)
+            ConditionalBlock(embed_dim, heads=heads, dim_head=dim_head,
+                             ff_dim=ff_dim, dropout=dropout)
             for _ in range(n_layers)
         ])
         self.norm = nn.LayerNorm(embed_dim)
@@ -173,9 +230,8 @@ class ARPredictor(nn.Module):
         """x: (B,T,D) frame embeddings, cond: (B,T,D) audio embeddings."""
         T = x.size(1)
         x = x + self.pos_embed[:, :T]
-        mask = nn.Transformer.generate_square_subsequent_mask(T, device=x.device)
         for block in self.blocks:
-            x = block(x, cond, mask=mask)
+            x = block(x, cond, causal=True)
         return self.norm(x)
 
 
@@ -184,15 +240,17 @@ class ARPredictor(nn.Module):
 # ---------------------------------------------------------------------------
 
 class JEPAWorldModel(nn.Module):
-    def __init__(self, embed_dim=EMBED_DIM, n_heads=8, n_layers=6, ff_dim=1024):
+    def __init__(self, embed_dim=EMBED_DIM, heads=16, dim_head=64,
+                 n_layers=6, ff_dim=2048):
         super().__init__()
         hidden_dim = embed_dim
 
         self.encoder = GlyphEncoder(hidden_dim=hidden_dim)
-        self.projector = ProjectorMLP(hidden_dim, embed_dim)
+        self.projector = ProjectorMLP(hidden_dim, embed_dim, hidden_dim=PROJ_HIDDEN)
         self.audio_encoder = AudioEncoder(embed_dim=embed_dim)
-        self.predictor = ARPredictor(embed_dim, n_heads, n_layers, ff_dim)
-        self.pred_projector = ProjectorMLP(embed_dim, embed_dim)
+        self.predictor = ARPredictor(embed_dim, heads=heads, dim_head=dim_head,
+                                      n_layers=n_layers, ff_dim=ff_dim)
+        self.pred_projector = ProjectorMLP(embed_dim, embed_dim, hidden_dim=PROJ_HIDDEN)
         self.sigreg = SIGReg()
 
     def encode(self, frames):
@@ -343,15 +401,18 @@ if __name__ == "__main__":
     device = torch.device(args.device if args.device != "auto" else
                           ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    # Model — paper hyperparams
+    # Model — paper hyperparams exactly
     model = JEPAWorldModel(
-        embed_dim=EMBED_DIM, n_heads=8, n_layers=6, ff_dim=1024,
+        embed_dim=EMBED_DIM, heads=16, dim_head=64, n_layers=6, ff_dim=2048,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"JEPAWorldModel: {n_params:,} params on {device}")
 
     # Optimizer — from paper: AdamW, lr=5e-5, wd=1e-3, grad_clip=1.0
     opt = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=1e-3)
+    # LR scheduler — paper uses LinearWarmupCosineAnnealingLR
+    warmup_epochs = 5
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs - warmup_epochs)
     SIGREG_LAMBDA = 0.09  # from paper
     bs = args.batch_size
 
@@ -382,8 +443,16 @@ if __name__ == "__main__":
             e_reg += sigreg_loss.item() * len(idx)
             n += len(idx)
 
+        # LR schedule: linear warmup then cosine decay
+        if epoch < warmup_epochs:
+            for pg in opt.param_groups:
+                pg['lr'] = 5e-5 * (epoch + 1) / warmup_epochs
+        else:
+            scheduler.step()
+
+        lr = opt.param_groups[0]['lr']
         print(f"Epoch {epoch+1}/{args.epochs}  "
-              f"L_pred={e_pred/n:.4f}  SIGReg={e_reg/n:.4f}")
+              f"L_pred={e_pred/n:.4f}  SIGReg={e_reg/n:.4f}  lr={lr:.2e}")
 
         if (epoch + 1) % 10 == 0:
             os.makedirs(os.path.dirname(args.checkpoint) or ".", exist_ok=True)
