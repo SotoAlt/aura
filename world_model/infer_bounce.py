@@ -54,8 +54,20 @@ def get_model():
     _model = model
 
     if "probe" in ckpt:
-        probe = StateProbe(embed_dim=embed_dim)
-        probe.load_state_dict(ckpt["probe"])
+        # Detect probe architecture from keys
+        probe_sd = ckpt["probe"]
+        first_key = list(probe_sd.keys())[0]
+        if first_key.startswith("net."):
+            probe = StateProbe(embed_dim=embed_dim)
+        else:
+            # nn.Sequential probe (stronger version)
+            import torch.nn as nn
+            probe = nn.Sequential(
+                nn.Linear(embed_dim, 128), nn.ReLU(),
+                nn.Linear(128, 64), nn.ReLU(),
+                nn.Linear(64, 5)
+            )
+        probe.load_state_dict(probe_sd)
         probe = probe.to(device).eval()
         _probe = probe
         _state_mean = ckpt["state_mean"].to(device)
@@ -227,6 +239,132 @@ async def websocket_endpoint(ws: WebSocket):
         logger.info("Client disconnected")
     except Exception as e:
         logger.error("Error: %s", e, exc_info=True)
+
+
+@app.websocket("/ws-flappy")
+async def flappy_endpoint(ws: WebSocket):
+    """Continuous mode: audio every frame, JEPA predicts next state.
+
+    Paper-aligned: single-step prediction from re-encoded rendered frames.
+    No AR latent chain — each step starts from clean encoder output.
+    Audio conditions each prediction via AdaLN-zero (like LeWM actions).
+    """
+    await ws.accept()
+    logger.info("Flappy client connected")
+
+    try:
+        model, probe, device = get_model()
+    except Exception as e:
+        await ws.send_json({"error": str(e)})
+        await ws.close(code=1011)
+        return
+
+    if probe is None:
+        await ws.send_json({"error": "No state probe in checkpoint"})
+        await ws.close(code=1011)
+        return
+
+    renderer = BounceWorld()
+    renderer.reset(seed=42)
+    renderer.ball_x = renderer.W / 2
+    renderer.ball_y = renderer.H / 2  # start in middle
+
+    # Build initial frame buffer (3 frames of ball at rest)
+    frame_buffer = []  # list of (H, W) long tensors — RENDERED frames
+    init_audio = np.zeros(16, dtype=np.float32)
+    for _ in range(HISTORY_SIZE):
+        frame_str = renderer.render_ascii(init_audio)
+        idx = frame_to_indices(frame_str)
+        if not isinstance(idx, torch.Tensor):
+            idx = torch.from_numpy(idx)
+        frame_buffer.append(idx.long())
+
+    # Audio embedding buffer (matches frame buffer)
+    audio_emb_buffer = []
+    with torch.no_grad():
+        zero_a_emb = model.audio_encoder(torch.zeros(1, 16, device=device))[0]
+    audio_emb_buffer = [zero_a_emb.clone() for _ in range(HISTORY_SIZE)]
+
+    frame_count = 0
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+
+            audio_list = msg.get("audio")
+            if audio_list is None or len(audio_list) != 16:
+                continue
+
+            audio_np = np.array(audio_list, dtype=np.float32)
+            audio_t = torch.tensor([audio_list], dtype=torch.float32, device=device)
+
+            with torch.no_grad():
+                # Step 1: Encode last 3 RENDERED frames (clean, no AR drift)
+                # This is paper-aligned: single-step from ground truth context
+                ctx_tensor = torch.stack(frame_buffer[-HISTORY_SIZE:]).unsqueeze(0).to(device)
+                ctx_emb = model.encode(ctx_tensor)  # (1, 3, D)
+
+                # Step 2: Encode current audio
+                current_audio_emb = model.audio_encoder(audio_t)  # (1, D)
+
+                # Step 3: Build audio context (last 3 audio embeddings)
+                audio_emb_buffer.append(current_audio_emb[0])
+                ctx_audio = torch.stack(audio_emb_buffer[-HISTORY_SIZE:]).unsqueeze(0)
+
+                # Step 4: JEPA predicts next embedding
+                pred_emb = model.predict_next(ctx_emb[0].unsqueeze(0), ctx_audio)  # (1, D)
+
+                # Step 5: State probe extracts ball physics
+                state_norm = probe(pred_emb)
+                state = state_norm[0] * _state_std + _state_mean
+                state = state.cpu().numpy()
+
+            # Step 6: Apply state to renderer
+            renderer.ball_x = float(np.clip(state[0] * renderer.W, 2, renderer.W - 3))
+            renderer.ball_y = float(np.clip(state[1] * renderer.H, 2, renderer.H - 4))
+
+            # Trail
+            renderer.trail.append((renderer.ball_x, renderer.ball_y))
+            if len(renderer.trail) > 12:
+                renderer.trail = renderer.trail[-12:]
+            renderer.particles = []
+
+            # Particles on loud audio
+            rms = (audio_np[12] + audio_np[13]) / 2
+            onset = (audio_np[6] + audio_np[7]) / 2
+            if onset > 0.3 or rms > 0.5:
+                for _ in range(int(max(onset, rms) * 6)):
+                    renderer.particles.append({
+                        'x': renderer.ball_x + renderer.rng.uniform(-2, 2),
+                        'y': renderer.ball_y,
+                        'vx': renderer.rng.uniform(-2, 2),
+                        'vy': renderer.rng.uniform(-3, 0),
+                        'life': renderer.rng.integers(2, 5),
+                    })
+
+            # Step 7: Render clean ASCII frame
+            frame_str = renderer.render_ascii(audio_np)
+
+            # Step 8: Store rendered frame for next step's context (re-encode loop)
+            idx = frame_to_indices(frame_str)
+            if not isinstance(idx, torch.Tensor):
+                idx = torch.from_numpy(idx)
+            frame_buffer.append(idx.long())
+            if len(frame_buffer) > HISTORY_SIZE + 4:
+                frame_buffer = frame_buffer[-(HISTORY_SIZE + 2):]
+
+            # Send to client
+            await ws.send_text(json.dumps({"frame": frame_str}))
+
+            frame_count += 1
+            if frame_count % 100 == 0:
+                logger.info("Flappy: %d frames served", frame_count)
+
+    except WebSocketDisconnect:
+        logger.info("Flappy client disconnected after %d frames", frame_count)
+    except Exception as e:
+        logger.error("Flappy error: %s", e, exc_info=True)
 
 
 def main():
