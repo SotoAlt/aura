@@ -8,7 +8,6 @@ Game: shout → ball flies → lands near target → score.
 import argparse
 import json
 import logging
-import time
 import asyncio
 import random
 import math
@@ -55,32 +54,14 @@ def get_model():
         first_key = list(probe_sd.keys())[0]
         if first_key.startswith("net."):
             probe = StateProbe(embed_dim=embed_dim)
-        elif "0.weight" in probe_sd and probe_sd["0.weight"].shape[1] == embed_dim:
-            # Deep probe: detect architecture from weight shapes
-            layers = []
-            i = 0
-            while f"{i}.weight" in probe_sd:
-                in_f = probe_sd[f"{i}.weight"].shape[1]
-                out_f = probe_sd[f"{i}.weight"].shape[0]
-                layers.append(nn.Linear(in_f, out_f))
-                i += 1
-                if f"{i}.weight" in probe_sd:  # next is linear, so add activation
-                    # Check if dropout exists
-                    pass
-                elif i < len([k for k in probe_sd if 'weight' in k]):
-                    pass
-            # Rebuild by inferring structure
-            probe = nn.Sequential(
-                nn.Linear(embed_dim, 256), nn.ReLU(), nn.Dropout(0.1),
-                nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.1),
-                nn.Linear(128, 64), nn.ReLU(),
-                nn.Linear(64, 5)
-            )
         else:
+            # Legacy flat probe — infer output dim from last weight
+            weight_keys = sorted(k for k in probe_sd if k.endswith(".weight"))
+            out_dim = probe_sd[weight_keys[-1]].shape[0]
             probe = nn.Sequential(
                 nn.Linear(embed_dim, 128), nn.ReLU(),
                 nn.Linear(128, 64), nn.ReLU(),
-                nn.Linear(64, 5)
+                nn.Linear(64, out_dim)
             )
         probe.load_state_dict(probe_sd)
         probe = probe.to(device).eval()
@@ -105,11 +86,10 @@ async def health():
 
 
 TARGET_CHAR = "◎"
-HOLE_CHAR = "⊕"
 TEE_CHAR = "▫"
 
 
-def render_golf_frame(renderer, target_x, target_y, trail=None, show_distance=False, score_text=""):
+def render_golf_frame(renderer, target_x, target_y, trail=None, score_text=""):
     """Render the golf course with ball, target, and trajectory trail."""
     frame_str = renderer.render_ascii(None)
     lines = [list(l) for l in frame_str.split('\n')]
@@ -408,8 +388,11 @@ async def canvas_endpoint(ws: WebSocket):
 
     frame_count = 0
     smooth_x, smooth_y = 0.5, 0.5
-    vel_y = 0.0  # velocity for bounce physics
+    vel_x, vel_y = 0.0, 0.0
     SMOOTH = 0.8
+    FLOOR = 0.91
+    GRAVITY = 0.002
+    BOUNCE = 0.5
 
     try:
         while True:
@@ -452,21 +435,12 @@ async def canvas_endpoint(ws: WebSocket):
             raw_y = float(state[1])
             rms = (audio_list[12] + audio_list[13]) / 2
 
-            # JEPA amplified target
             center_y = 0.85
             amplified_y = center_y + (raw_y - center_y) * 4.0
             amplified_y = float(np.clip(amplified_y, 0.05, 0.92))
 
-            # Physics feel: velocity + gravity + bounce
-            FLOOR = 0.91  # closer to actual ground line
-            GRAVITY = 0.002
-            BOUNCE = 0.5
-            vel_x = getattr(canvas_endpoint, '_vx', 0.0)
-
             if rms > 0.05:
-                # Audio: JEPA pulls toward predicted position
-                pull_y = (amplified_y - smooth_y) * 0.35
-                vel_y += pull_y
+                vel_y += (amplified_y - smooth_y) * 0.35
                 vel_x += (random.random() - 0.5) * 0.002
             else:
                 vel_y += GRAVITY
@@ -475,12 +449,10 @@ async def canvas_endpoint(ws: WebSocket):
             smooth_y += vel_y
             smooth_x += vel_x
 
-            # Dampen + center pull on X
             vel_y *= 0.94
             vel_x *= 0.90
-            vel_x += (0.5 - smooth_x) * 0.005  # pull toward center
+            vel_x += (0.5 - smooth_x) * 0.005
 
-            # Floor bounce — ball touches the floor
             if smooth_y >= FLOOR:
                 smooth_y = FLOOR
                 if abs(vel_y) > 0.003:
@@ -488,20 +460,16 @@ async def canvas_endpoint(ws: WebSocket):
                 else:
                     vel_y = 0
 
-            # Ceiling bounce
             if smooth_y < 0.04:
                 smooth_y = 0.04
                 vel_y = abs(vel_y) * 0.3
 
-            # X bounds — gentle wall bounce
             if smooth_x < 0.08:
                 smooth_x = 0.08
                 vel_x = abs(vel_x) * 0.5
             if smooth_x > 0.92:
                 smooth_x = 0.92
                 vel_x = -abs(vel_x) * 0.5
-
-            canvas_endpoint._vx = vel_x
 
             await ws.send_text(json.dumps({
                 "x": round(smooth_x, 4),

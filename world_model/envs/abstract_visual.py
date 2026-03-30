@@ -232,10 +232,10 @@ class AlienCorridorEnv:
         # --- COLORS ---
         t_col = af['temperature']
         gp = 0.75 + 0.25 * np.sin(self.glow_phase * 2)
-        nr, ng, nb = 20 + t_col * 235, 200 - t_col * 100, 255 - t_col * 230
-        ar, ag, ab = 180 - t_col * 140, 60 + t_col * 80, 120 + t_col * 60
-        br, bg, bb = 16 + t_col * 10, 20 + (1-t_col) * 7, 26 + (1-t_col) * 12
-        fr, fg, fb = 12 + t_col * 8, 15 + (1-t_col) * 5, 20 + (1-t_col) * 9
+        nr, ng, nb = 50 + t_col * 205, 220 - t_col * 80, 255 - t_col * 200  # brighter neon
+        ar, ag, ab = 200 - t_col * 120, 80 + t_col * 100, 150 + (1-t_col) * 50  # more vibrant accents
+        br, bg, bb = 40 + t_col * 30, 50 + (1-t_col) * 20, 65 + (1-t_col) * 35  # 2-3x brighter walls
+        fr, fg, fb = 30 + t_col * 24, 40 + (1-t_col) * 15, 50 + (1-t_col) * 27  # 2-3x brighter floor
 
         # --- COMPOSE ---
         r = np.zeros((s, s), dtype=np.float32)
@@ -271,11 +271,11 @@ class AlienCorridorEnv:
         r += ceil_lights * nr * 0.4 * df; g += ceil_lights * ng * 0.4 * df; b += ceil_lights * nb * 0.4 * df
 
         # Depth fog
-        fog = (1 - df) * 0.8
-        r = r * (1 - fog) + 2 * fog; g = g * (1 - fog) + 2 * fog; b = b * (1 - fog) + 3 * fog
+        fog = (1 - df) * 0.4  # less fog
+        r = r * (1 - fog) + 8 * fog; g = g * (1 - fog) + 8 * fog; b = b * (1 - fog) + 12 * fog
 
-        # Brightness
-        bri = 0.15 + af['rms'] * 0.85
+        # Brightness — min 55% (was 15%)
+        bri = 0.55 + af['rms'] * 0.45
         r *= bri; g *= bri; b *= bri
 
         # Flash
@@ -290,7 +290,7 @@ class AlienCorridorEnv:
 
         # Vignette
         vd = np.sqrt(self.ndx**2 + self.ndy**2)
-        vig = np.clip(1 - 0.4 * vd ** 1.8, 0.3, 1)
+        vig = np.clip(1 - 0.2 * vd ** 1.5, 0.5, 1)  # brighter edges
         r *= vig; g *= vig; b *= vig
 
         return np.clip(np.stack([r, g, b], axis=-1), 0, 255).astype(np.uint8)

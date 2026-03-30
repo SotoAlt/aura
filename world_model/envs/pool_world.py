@@ -3,13 +3,10 @@
 7 balls (1 cue + 6 colored) with elastic collisions, wall bounces,
 friction, and pockets. Renders as 128x128 RGB images.
 
-The JEPA learns to predict multi-body chain reactions — dynamics that
-a simple formula can't capture (ball→ball→ball collisions).
-
 Usage:
     env = PoolWorld()
     env.reset()
-    env.shoot(angle=0.5, power=0.8)  # hit cue ball
+    env.shoot(angle=0.5, power=0.8)
     for _ in range(60):
         env.step()
         img = env.render()  # (128, 128, 3) uint8
@@ -18,7 +15,7 @@ from __future__ import annotations
 
 import math
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # Table dimensions (normalized 0-1)

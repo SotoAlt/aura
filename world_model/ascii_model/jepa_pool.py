@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import math
 
 import numpy as np
 import torch
@@ -396,68 +395,65 @@ if __name__ == "__main__":
     # =====================================================
     # State Probe
     # =====================================================
-    if states is not None:
-        print(f"\n=== State Probe Training: {args.probe_epochs} epochs ===")
-        probe = StateProbe().to(device)
-        probe_opt = torch.optim.Adam(probe.parameters(), lr=1e-3)
+    print(f"\n=== State Probe Training: {args.probe_epochs} epochs ===")
+    probe = StateProbe().to(device)
+    probe_opt = torch.optim.Adam(probe.parameters(), lr=1e-3)
 
-        s_mean = windows_s.mean(0)
-        s_std = windows_s.std(0).clamp(min=1e-6)
+    s_mean = windows_s.mean(0)
+    s_std = windows_s.std(0).clamp(min=1e-6)
 
-        model.eval()
-        # Pre-encode all frames
-        print("Encoding frames for probe training...")
-        all_emb = []
-        with torch.no_grad():
-            for i in range(0, len(windows_f), bs):
-                batch = windows_f[i:i+bs].to(device)
-                emb = model.encode(batch)[:, -1]  # last frame embedding
-                all_emb.append(emb.cpu())
-        all_emb = torch.cat(all_emb)
-        states_n = (windows_s - s_mean) / s_std
+    model.eval()
+    print("Encoding frames for probe training...")
+    all_emb = []
+    with torch.no_grad():
+        for i in range(0, len(windows_f), bs):
+            batch = windows_f[i:i+bs].to(device)
+            emb = model.encode(batch)[:, -1]
+            all_emb.append(emb.cpu())
+    all_emb = torch.cat(all_emb)
+    states_n = (windows_s - s_mean) / s_std
 
-        best_val = float('inf')
-        n_tr = int(len(all_emb) * 0.9)
+    best_val = float('inf')
+    n_tr = int(len(all_emb) * 0.9)
 
-        for epoch in range(args.probe_epochs):
-            probe.train()
-            perm = torch.randperm(n_tr)
-            for i in range(0, n_tr, bs * 2):
-                idx = perm[i:i + bs * 2]
-                pred = probe(all_emb[idx].to(device))
-                loss = F.mse_loss(pred, states_n[idx].to(device))
-                probe_opt.zero_grad()
-                loss.backward()
-                probe_opt.step()
+    for epoch in range(args.probe_epochs):
+        probe.train()
+        perm = torch.randperm(n_tr)
+        for i in range(0, n_tr, bs * 2):
+            idx = perm[i:i + bs * 2]
+            pred = probe(all_emb[idx].to(device))
+            loss = F.mse_loss(pred, states_n[idx].to(device))
+            probe_opt.zero_grad()
+            loss.backward()
+            probe_opt.step()
 
-            probe.eval()
-            with torch.no_grad():
-                val = F.mse_loss(probe(all_emb[n_tr:].to(device)),
-                                 states_n[n_tr:].to(device)).item()
-            if val < best_val:
-                best_val = val
-
-            if (epoch + 1) % 10 == 0:
-                print(f"  Probe epoch {epoch+1}/{args.probe_epochs}  "
-                      f"val={val:.4f}  best={best_val:.4f}")
-
-        # Per-ball correlation
         probe.eval()
         with torch.no_grad():
-            pred = probe(all_emb[n_tr:].to(device)).cpu()
-            tgt = states_n[n_tr:]
-            for ball in range(7):
-                bx = ball * 4
-                cx = np.corrcoef(pred[:, bx].numpy(), tgt[:, bx].numpy())[0, 1]
-                cy = np.corrcoef(pred[:, bx+1].numpy(), tgt[:, bx+1].numpy())[0, 1]
-                print(f"  Ball {ball}: x_corr={cx:+.3f}  y_corr={cy:+.3f}")
+            val = F.mse_loss(probe(all_emb[n_tr:].to(device)),
+                             states_n[n_tr:].to(device)).item()
+        if val < best_val:
+            best_val = val
 
-        ckpt = torch.load(args.checkpoint, weights_only=False)
-        ckpt["probe"] = probe.state_dict()
-        ckpt["state_mean"] = s_mean
-        ckpt["state_std"] = s_std
-        torch.save(ckpt, args.checkpoint)
-        print(f"Probe saved -> {args.checkpoint}")
+        if (epoch + 1) % 10 == 0:
+            print(f"  Probe epoch {epoch+1}/{args.probe_epochs}  "
+                  f"val={val:.4f}  best={best_val:.4f}")
+
+    probe.eval()
+    with torch.no_grad():
+        pred = probe(all_emb[n_tr:].to(device)).cpu()
+        tgt = states_n[n_tr:]
+        for ball in range(7):
+            bx = ball * 4
+            cx = np.corrcoef(pred[:, bx].numpy(), tgt[:, bx].numpy())[0, 1]
+            cy = np.corrcoef(pred[:, bx+1].numpy(), tgt[:, bx+1].numpy())[0, 1]
+            print(f"  Ball {ball}: x_corr={cx:+.3f}  y_corr={cy:+.3f}")
+
+    ckpt = torch.load(args.checkpoint, weights_only=False)
+    ckpt["probe"] = probe.state_dict()
+    ckpt["state_mean"] = s_mean
+    ckpt["state_std"] = s_std
+    torch.save(ckpt, args.checkpoint)
+    print(f"Probe saved -> {args.checkpoint}")
 
     # Quick rollout test
     print("\n=== Rollout Test ===")

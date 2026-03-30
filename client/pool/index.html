@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeBall Pool — JEPA World Model</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --felt: #1b6b3a;
+    --felt-dark: #145229;
+    --rail: #5a3214;
+    --rail-light: #7a4a22;
+    --rail-edge: #3d2008;
+    --pocket: #0a0a08;
+    --gold: #c4973b;
+    --gold-dim: #8a6b2a;
+    --ivory: #f0e8d8;
+    --dark: #0d0c0a;
+    --pred: rgba(196,151,59,0.4);
+    --actual: rgba(240,232,216,0.2);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--dark);
+    font-family: 'DM Mono', monospace;
+    color: var(--ivory);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background-image:
+      radial-gradient(ellipse at 50% 30%, rgba(90,50,20,0.08) 0%, transparent 70%);
+  }
+
+  .frame {
+    width: min(94vw, 960px);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0 4px;
+  }
+  .top-bar h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 700;
+    font-size: 1.35em;
+    letter-spacing: 0.06em;
+    color: var(--gold);
+  }
+  .top-bar h1 em {
+    font-style: normal;
+    color: var(--ivory);
+    font-weight: 400;
+  }
+  .top-bar .tag {
+    font-size: 0.55em;
+    color: var(--gold-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  #status {
+    text-align: center;
+    font-size: 0.72em;
+    color: var(--gold);
+    padding: 2px 0;
+    min-height: 1.4em;
+    letter-spacing: 0.04em;
+  }
+
+  .table-outer {
+    position: relative;
+    border-radius: 10px;
+    padding: 14px;
+    background: linear-gradient(135deg, var(--rail-light) 0%, var(--rail) 40%, var(--rail-edge) 100%);
+    box-shadow:
+      0 8px 32px rgba(0,0,0,0.6),
+      inset 0 1px 0 rgba(255,255,255,0.06),
+      inset 0 -1px 0 rgba(0,0,0,0.3);
+  }
+  .table-inner {
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
+  }
+  canvas { display: block; width: 100%; cursor: crosshair; }
+
+  .hud {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    font-size: 0.58em;
+    color: var(--gold-dim);
+    text-align: right;
+    line-height: 1.9;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .hud .num {
+    color: var(--gold);
+    font-weight: 400;
+    font-size: 1.15em;
+  }
+
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 4px;
+    font-size: 0.55em;
+    color: var(--gold-dim);
+    opacity: 0.5;
+    letter-spacing: 0.03em;
+  }
+
+  /* Overlay */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(13,12,10,0.96);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    cursor: pointer;
+  }
+  .ov-inner { text-align: center; max-width: 420px; }
+  .ov-inner h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 3em;
+    font-weight: 700;
+    color: var(--gold);
+    letter-spacing: 0.1em;
+    margin-bottom: 0.3em;
+  }
+  .ov-inner h2 em { font-style: normal; color: var(--ivory); font-weight: 400; }
+  .ov-inner p {
+    font-size: 0.78em;
+    line-height: 1.8;
+    color: var(--gold-dim);
+    margin-bottom: 1.6em;
+  }
+  .ov-inner .btn {
+    display: inline-block;
+    border: 1px solid var(--gold-dim);
+    color: var(--gold);
+    padding: 10px 36px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7em;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    transition: all 0.25s;
+  }
+  .ov-inner .btn:hover { background: var(--gold); color: var(--dark); }
+</style>
+</head>
+<body>
+
+<div class="overlay" id="overlay">
+  <div class="ov-inner">
+    <h2>Le<em>Ball</em></h2>
+    <p>
+      Point where you want the cue ball to go and click.<br>
+      The AI predicts where every ball ends up.<br>
+      Then watch physics play out and compare.<br><br>
+      13M param JEPA world model &middot; multi-body collision prediction
+    </p>
+    <div class="btn">Play</div>
+  </div>
+</div>
+
+<div class="frame">
+  <div class="top-bar">
+    <h1>Le<em>Ball</em></h1>
+    <span class="tag">JEPA World Model &middot; 13M params</span>
+  </div>
+  <div id="status">Click on the table to shoot the cue ball</div>
+  <div class="table-outer">
+    <div class="table-inner">
+      <canvas id="c"></canvas>
+    </div>
+    <div class="hud">
+      Shot <span class="num" id="s-shot">0</span><br>
+      Accuracy <span class="num" id="s-acc">&mdash;</span><br>
+      JEPA <span class="num" id="s-jepa">ready</span>
+    </div>
+  </div>
+  <div class="footer">
+    <span>click to shoot &middot; distance from cue = power</span>
+    <span>gold dotted = predicted &middot; faint = actual</span>
+  </div>
+</div>
+
+<script>
+// Physics constants — must match pool_world.py
+const TABLE_W = 1.0, TABLE_H = 0.5;
+const BALL_R = 0.018;
+const FRICTION = 0.985;
+const MIN_VEL = 0.0005;
+const POCKET_R = 0.035;
+const COLORS = ['#f0e8d8','#c0392b','#2471a3','#d4ac0d','#27ae60','#8e44ad','#d35400'];
+const POCKET_POS = [[0,0],[0.5,0],[1,0],[0,0.5],[0.5,0.5],[1,0.5]];
+
+let W, H, scaleX, scaleY;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let balls = [];
+let predictedPaths = [];
+let actualPaths = [];
+let gameState = 'ready';
+let dragStart = null, dragEnd = null;
+let shotCount = 0;
+let ws = null;
+let mouseX = 0.5, mouseY = 0.25;
+
+function resize() {
+  const r = window.devicePixelRatio || 1;
+  const wrap = canvas.parentElement;
+  W = wrap.clientWidth;
+  H = W * 0.5;
+  canvas.width = W * r;
+  canvas.height = H * r;
+  canvas.style.height = H + 'px';
+  ctx.setTransform(r, 0, 0, r, 0, 0);
+  scaleX = W; scaleY = H;
+}
+
+function resetBalls() {
+  balls = [{x:0.25, y:0.25, vx:0, vy:0, color:0, active:true}];
+  const sx=0.65, sy=0.25, sp=BALL_R*2.5;
+  let idx = 1;
+  for (let row=0; row<3; row++)
+    for (let col=0; col<=row; col++) {
+      if (idx>=7) break;
+      balls.push({x:sx+row*sp*0.866, y:sy+(col-row/2)*sp, vx:0, vy:0, color:idx, active:true});
+      idx++;
+    }
+  predictedPaths = []; actualPaths = [];
+}
+
+function connectWS() {
+  ws = new WebSocket('ws://localhost:8768/ws-pool');
+  ws.onclose = () => setTimeout(connectWS, 2000);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'predicted') {
+      predictedPaths = msg.paths;
+      gameState = 'executing';
+      document.getElementById('s-jepa').textContent = 'done';
+      executeShot();
+    }
+  };
+}
+
+function ts(x, y) { return [x * scaleX, y * scaleY]; }
+
+function draw() {
+  // Felt with subtle texture
+  ctx.fillStyle = '#145229';
+  ctx.fillRect(0, 0, W, H);
+  // Lighter center
+  const fg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.5);
+  fg.addColorStop(0, 'rgba(30,120,65,0.2)');
+  fg.addColorStop(1, 'transparent');
+  ctx.fillStyle = fg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle felt lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.015)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i < W; i += 6) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,H); ctx.stroke(); }
+
+  // Baulk line
+  ctx.beginPath();
+  ctx.moveTo(W*0.3, H*0.1);
+  ctx.lineTo(W*0.3, H*0.9);
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Pockets
+  for (const [px, py] of POCKET_POS) {
+    const [sx, sy] = ts(px, py);
+    const pr = BALL_R * scaleX * 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, pr, 0, Math.PI*2);
+    ctx.fillStyle = '#0a0a08';
+    ctx.fill();
+    // Pocket rim
+    ctx.beginPath();
+    ctx.arc(sx, sy, pr + 1, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(90,50,20,0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Predicted paths
+  for (let b = 0; b < predictedPaths.length; b++) {
+    const path = predictedPaths[b];
+    if (!path || path.length < 2) continue;
+    ctx.beginPath();
+    ctx.setLineDash([2, 4]);
+    const [sx0, sy0] = ts(path[0].x, path[0].y);
+    ctx.moveTo(sx0, sy0);
+    for (let i = 1; i < path.length; i++) { const [sx,sy] = ts(path[i].x, path[i].y); ctx.lineTo(sx,sy); }
+    ctx.strokeStyle = 'rgba(196,151,59,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const last = path[path.length-1];
+    const [lx,ly] = ts(last.x, last.y);
+    ctx.beginPath(); ctx.arc(lx,ly, BALL_R*scaleX*0.5, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(196,151,59,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // Actual paths
+  for (let b = 0; b < actualPaths.length; b++) {
+    const path = actualPaths[b];
+    if (!path || path.length < 2) continue;
+    ctx.beginPath();
+    const [sx0,sy0] = ts(path[0].x, path[0].y);
+    ctx.moveTo(sx0, sy0);
+    for (let i = 1; i < path.length; i++) { const [sx,sy] = ts(path[i].x, path[i].y); ctx.lineTo(sx,sy); }
+    ctx.strokeStyle = 'rgba(240,232,216,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // Balls
+  const br = BALL_R * scaleX;
+  for (const b of balls) {
+    if (!b.active) continue;
+    const [sx, sy] = ts(b.x, b.y);
+    // Shadow
+    ctx.beginPath(); ctx.ellipse(sx+2, sy+2, br, br*0.7, 0, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill();
+    // Ball body
+    ctx.beginPath(); ctx.arc(sx, sy, br, 0, Math.PI*2);
+    const g = ctx.createRadialGradient(sx-br*0.35, sy-br*0.35, br*0.1, sx, sy, br);
+    const c = COLORS[b.color];
+    g.addColorStop(0, lighten(c, 60));
+    g.addColorStop(0.7, c);
+    g.addColorStop(1, darken(c, 30));
+    ctx.fillStyle = g;
+    ctx.fill();
+    // Specular highlight
+    ctx.beginPath(); ctx.arc(sx - br*0.25, sy - br*0.25, br*0.3, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fill();
+  }
+
+  // Aim line
+  if ((gameState === 'ready' || gameState === 'scored') && balls[0]?.active) {
+    const cue = balls[0];
+    const [sx, sy] = ts(cue.x, cue.y);
+    const dx = mouseX - cue.x, dy = mouseY - cue.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist > 0.01) {
+      const nx = dx/dist, ny = dy/dist;
+      const power = Math.min(dist / 0.4, 1.0);
+      const len = 0.12 + power * 0.25;
+      const [ex, ey] = ts(cue.x + nx*len, cue.y + ny*len);
+
+      // Aim dotted line
+      ctx.beginPath(); ctx.setLineDash([3,5]);
+      ctx.moveTo(sx, sy); ctx.lineTo(ex, ey);
+      ctx.strokeStyle = `rgba(196,151,59,${0.2 + power*0.5})`;
+      ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+
+      // Cue stick
+      const [cs, ce] = [0.025, 0.025 + 0.14];
+      const [bsx, bsy] = ts(cue.x - nx*cs, cue.y - ny*cs);
+      const [bex, bey] = ts(cue.x - nx*ce, cue.y - ny*ce);
+      ctx.beginPath(); ctx.moveTo(bsx,bsy); ctx.lineTo(bex,bey);
+      // Taper
+      const cg = ctx.createLinearGradient(bsx,bsy,bex,bey);
+      cg.addColorStop(0, '#f0e8d8'); cg.addColorStop(0.05, '#c4973b');
+      cg.addColorStop(0.3, '#7a4a22'); cg.addColorStop(1, '#3d2008');
+      ctx.strokeStyle = cg; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.stroke();
+      ctx.lineCap = 'butt';
+
+      // Power arc
+      ctx.beginPath();
+      ctx.arc(sx, sy, br + 6, Math.atan2(ny,nx) - 0.5, Math.atan2(ny,nx) - 0.5 + power * 1.0);
+      ctx.strokeStyle = power > 0.7 ? '#c0392b' : 'rgba(196,151,59,0.6)';
+      ctx.lineWidth = 2; ctx.stroke();
+    }
+  }
+
+  requestAnimationFrame(draw);
+}
+
+function lighten(hex, a) {
+  let r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  return `rgb(${Math.min(255,r+a)},${Math.min(255,g+a)},${Math.min(255,b+a)})`;
+}
+function darken(hex, a) {
+  let r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  return `rgb(${Math.max(0,r-a)},${Math.max(0,g-a)},${Math.max(0,b-a)})`;
+}
+
+function executeShot() {
+  if (!dragStart) return;
+  const dx = (dragEnd?dragEnd.x:mouseX)-dragStart.x;
+  const dy = (dragEnd?dragEnd.y:mouseY)-dragStart.y;
+  const dist = Math.sqrt(dx*dx+dy*dy);
+  const power = dragStart.power || Math.min(dist/0.4, 1.0);
+  const angle = dragStart.angle || Math.atan2(dy, dx);
+  const speed = power * 0.08;
+  balls[0].vx = Math.cos(angle)*speed;
+  balls[0].vy = Math.sin(angle)*speed;
+
+  actualPaths = balls.map(b => [{x:b.x, y:b.y}]);
+  let settled = false, step = 0;
+
+  function tick() {
+    if (settled || step > 200) { gameState = 'scored'; scoreShot(); return; }
+    for (let fs = 0; fs < 5; fs++) {
+      for (const b of balls) {
+        if (!b.active) continue;
+        b.x += b.vx; b.y += b.vy;
+        b.vx *= FRICTION; b.vy *= FRICTION;
+        if (Math.abs(b.vx)<MIN_VEL && Math.abs(b.vy)<MIN_VEL) { b.vx=0; b.vy=0; }
+        if (b.x<BALL_R){b.x=BALL_R;b.vx=Math.abs(b.vx)*0.9;}
+        if (b.x>1-BALL_R){b.x=1-BALL_R;b.vx=-Math.abs(b.vx)*0.9;}
+        if (b.y<BALL_R){b.y=BALL_R;b.vy=Math.abs(b.vy)*0.9;}
+        if (b.y>0.5-BALL_R){b.y=0.5-BALL_R;b.vy=-Math.abs(b.vy)*0.9;}
+      }
+      for (let i=0;i<balls.length;i++){
+        if(!balls[i].active)continue;
+        for(let j=i+1;j<balls.length;j++){
+          if(!balls[j].active)continue;
+          const a=balls[i],b=balls[j];
+          const ddx=b.x-a.x,ddy=b.y-a.y,d=Math.sqrt(ddx*ddx+ddy*ddy);
+          if(d<BALL_R*2&&d>0){
+            const nx=ddx/d,ny=ddy/d;
+            const dvn=(a.vx-b.vx)*nx+(a.vy-b.vy)*ny;
+            if(dvn>0){a.vx-=dvn*nx;a.vy-=dvn*ny;b.vx+=dvn*nx;b.vy+=dvn*ny;
+            const ov=BALL_R*2-d;a.x-=ov*0.5*nx;a.y-=ov*0.5*ny;b.x+=ov*0.5*nx;b.y+=ov*0.5*ny;}
+          }
+        }
+      }
+      for(const b of balls){if(!b.active)continue;
+        for(const[px,py]of POCKET_POS){if(Math.sqrt((b.x-px)**2+(b.y-py)**2)<POCKET_R){b.active=false;b.vx=0;b.vy=0;}}}
+    }
+    for(let i=0;i<balls.length;i++){if(actualPaths[i])actualPaths[i].push({x:balls[i].x,y:balls[i].y});}
+    step++;
+    settled = balls.every(b => !b.active || (b.vx===0 && b.vy===0));
+    document.getElementById('status').textContent = settled ? 'Settling...' : `Shot in progress`;
+    setTimeout(tick, 40);  // ~25fps — slower, more watchable
+  }
+  tick();
+}
+
+function scoreShot() {
+  if (!predictedPaths.length) {
+    document.getElementById('status').textContent = 'Shot complete — connect JEPA server for predictions';
+    gameState = 'ready'; return;
+  }
+  let err = 0, n = 0;
+  for (let i = 0; i < Math.min(predictedPaths.length, balls.length); i++) {
+    if (!predictedPaths[i]?.length) continue;
+    const p = predictedPaths[i].at(-1), a = balls[i];
+    err += Math.sqrt((p.x-a.x)**2+(p.y-a.y)**2); n++;
+  }
+  const acc = Math.max(0, (1 - (n?err/n:1) / 0.5) * 100);
+  shotCount++;
+  document.getElementById('s-shot').textContent = shotCount;
+  document.getElementById('s-acc').textContent = acc.toFixed(0) + '%';
+  document.getElementById('s-acc').style.color = acc > 50 ? 'var(--gold)' : '#c0392b';
+  document.getElementById('status').textContent = `${acc.toFixed(0)}% accuracy — click to shoot again`;
+  gameState = 'ready';
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  mouseX = (e.clientX-r.left)/r.width;
+  mouseY = (e.clientY-r.top)/r.height * TABLE_H;
+});
+
+canvas.addEventListener('click', (e) => {
+  if (gameState !== 'ready' && gameState !== 'scored') return;
+  const cue = balls[0];
+  if (!cue?.active) { resetBalls(); return; }
+  const r = canvas.getBoundingClientRect();
+  const mx = (e.clientX-r.left)/r.width;
+  const my = (e.clientY-r.top)/r.height * TABLE_H;
+  const dx = mx-cue.x, dy = my-cue.y;
+  const dist = Math.sqrt(dx*dx+dy*dy);
+  if (dist < 0.01) return;
+
+  const power = Math.min(dist/0.4, 1.0);
+  const angle = Math.atan2(dy, dx);
+  dragStart = {x:cue.x, y:cue.y, power, angle};
+  dragEnd = {x:mx, y:my};
+  predictedPaths = []; actualPaths = [];
+
+  if (ws?.readyState === WebSocket.OPEN) {
+    gameState = 'predicting';
+    document.getElementById('status').textContent = 'JEPA predicting...';
+    document.getElementById('s-jepa').textContent = '...';
+    ws.send(JSON.stringify({type:'shoot', angle, power,
+      balls: balls.map(b=>({x:b.x,y:b.y,vx:b.vx,vy:b.vy,active:b.active}))}));
+  } else {
+    gameState = 'executing';
+    executeShot();
+  }
+});
+
+document.getElementById('overlay').addEventListener('click', () => {
+  const ov = document.getElementById('overlay');
+  ov.style.opacity = '0'; ov.style.transition = 'opacity 0.4s';
+  setTimeout(() => ov.remove(), 400);
+  resize(); resetBalls(); connectWS(); requestAnimationFrame(draw);
+});
+window.addEventListener('resize', resize);
+</script>
+</body>
+</html>
