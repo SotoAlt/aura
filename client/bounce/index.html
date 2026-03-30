@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AURA — Bounce World Model</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; display: flex; align-items: center; justify-content: center; height: 100vh; flex-direction: column; }
+  #frame { font-family: 'Courier New', monospace; color: #33ffcc; white-space: pre; line-height: 1.1; letter-spacing: 0.05em; text-align: center; }
+  #status { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 1.2em; color: #ff33cc; text-align: center; }
+  #meter { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); width: 300px; height: 20px; border: 1px solid #33ffcc; }
+  #meter-fill { height: 100%; background: #33ffcc; width: 0%; transition: width 0.05s; }
+  #threshold-line { position: absolute; left: 25%; top: 0; height: 100%; width: 2px; background: #ff33cc; }
+  #meter-label { position: fixed; bottom: 55px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 0.7em; color: #33ffcc88; }
+  #overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(10,10,10,0.92); display: flex; align-items: center; justify-content: center; z-index: 10; cursor: pointer; }
+  #overlay span { font-family: 'Courier New', monospace; color: #33ffcc; font-size: 1.3em; text-align: center; line-height: 2; }
+</style>
+</head>
+<body>
+
+<div id="overlay"><span>
+AURA — Bounce World Model<br><br>
+SCREAM to launch the ball!<br>
+The AI imagines ALL the physics.<br><br>
+Click to start (allow mic)
+</span></div>
+
+<div id="status">Listening...</div>
+<pre id="frame"></pre>
+<div id="meter-label">Volume — scream past the pink line to launch!</div>
+<div id="meter"><div id="meter-fill"></div><div id="threshold-line"></div></div>
+
+<script>
+let audioCtx, analyser, timeData;
+let ws = null;
+const LAUNCH_THRESHOLD = 0.25;
+let state = 'listening'; // listening | launched | done
+let cooldown = 0;
+
+function connectWS() {
+  ws = new WebSocket('ws://localhost:8767/ws');
+  ws.onopen = () => { document.getElementById('status').textContent = 'Listening for your scream...'; };
+  ws.onclose = () => { setTimeout(connectWS, 2000); };
+  ws.onerror = () => { document.getElementById('status').textContent = 'Server not running on port 8767'; };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'idle' || msg.type === 'frame') {
+      document.getElementById('frame').textContent = msg.frame;
+    }
+    if (msg.type === 'done') {
+      state = 'listening';
+      document.getElementById('status').textContent = 'Scream again to relaunch!';
+      cooldown = 15;
+    }
+  };
+}
+
+function getRMS() {
+  if (!analyser || !timeData) return 0;
+  analyser.getByteTimeDomainData(timeData);
+  let sum = 0;
+  for (let i = 0; i < timeData.length; i++) {
+    const v = (timeData[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.min(1, Math.sqrt(sum / timeData.length) * 3);
+}
+
+// Main loop at 10 FPS
+setInterval(() => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const rms = getRMS();
+
+  // Update meter
+  document.getElementById('meter-fill').style.width = (rms * 100) + '%';
+  document.getElementById('meter-fill').style.background = rms > LAUNCH_THRESHOLD ? '#ff33cc' : '#33ffcc';
+
+  if (cooldown > 0) { cooldown--; return; }
+
+  if (state === 'listening' || state === 'done') {
+    // Send idle frame request with current volume
+    ws.send(JSON.stringify({ mode: 'listen', volume: rms }));
+
+    // Check for scream!
+    if (rms > LAUNCH_THRESHOLD) {
+      state = 'launched';
+      document.getElementById('status').textContent = '🚀 LAUNCHED! AI imagining physics...';
+      ws.send(JSON.stringify({ mode: 'launch', volume: rms }));
+    }
+  }
+  // During 'launched', server streams frames — we just display them
+}, 100);
+
+// Init
+document.getElementById('overlay').addEventListener('click', async () => {
+  document.getElementById('overlay').remove();
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  timeData = new Uint8Array(analyser.fftSize);
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+  } catch (e) {
+    document.getElementById('status').textContent = 'Mic denied — need mic to scream!';
+    return;
+  }
+
+  connectWS();
+
+  // Scale
+  const el = document.getElementById('frame');
+  function scale() {
+    const s = Math.min(window.innerWidth / (80 * 9.6), (window.innerHeight - 100) / (40 * 11)) * 0.95;
+    el.style.fontSize = (10 * s) + 'px';
+  }
+  scale();
+  window.addEventListener('resize', scale);
+});
+</script>
+</body>
+</html>

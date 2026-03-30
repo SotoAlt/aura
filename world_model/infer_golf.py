@@ -407,8 +407,9 @@ async def canvas_endpoint(ws: WebSocket):
         audio_emb_buffer = [zero_a.clone() for _ in range(HISTORY_SIZE)]
 
     frame_count = 0
-    smooth_x, smooth_y = 0.5, 0.8
-    SMOOTH = 0.8  # heavy smoothing to reduce jitter
+    smooth_x, smooth_y = 0.5, 0.5
+    vel_y = 0.0  # velocity for bounce physics
+    SMOOTH = 0.8
 
     try:
         while True:
@@ -451,20 +452,56 @@ async def canvas_endpoint(ws: WebSocket):
             raw_y = float(state[1])
             rms = (audio_list[12] + audio_list[13]) / 2
 
-            # Lock X to center
-            smooth_x = 0.5
+            # JEPA amplified target
+            center_y = 0.85
+            amplified_y = center_y + (raw_y - center_y) * 4.0
+            amplified_y = float(np.clip(amplified_y, 0.05, 0.92))
 
-            # Amplify Y movement — stretch probe output to use full screen
-            # The probe outputs ~0.85-0.95 range, map to 0.1-0.9
-            center_y = 0.9  # resting position (near floor)
-            amplified_y = center_y + (raw_y - center_y) * 4.0  # 4x amplification
-            amplified_y = float(np.clip(amplified_y, 0.05, 0.95))
+            # Physics feel: velocity + gravity + bounce
+            FLOOR = 0.91  # closer to actual ground line
+            GRAVITY = 0.002
+            BOUNCE = 0.5
+            vel_x = getattr(canvas_endpoint, '_vx', 0.0)
 
-            # During silence: drift to floor
-            if rms < 0.05:
-                smooth_y = 0.9 * smooth_y + 0.1 * 0.92
+            if rms > 0.05:
+                # Audio: JEPA pulls toward predicted position
+                pull_y = (amplified_y - smooth_y) * 0.35
+                vel_y += pull_y
+                vel_x += (random.random() - 0.5) * 0.002
             else:
-                smooth_y = 0.6 * smooth_y + 0.4 * amplified_y  # less smoothing, more responsive
+                vel_y += GRAVITY
+
+            # Apply velocity
+            smooth_y += vel_y
+            smooth_x += vel_x
+
+            # Dampen + center pull on X
+            vel_y *= 0.94
+            vel_x *= 0.90
+            vel_x += (0.5 - smooth_x) * 0.005  # pull toward center
+
+            # Floor bounce — ball touches the floor
+            if smooth_y >= FLOOR:
+                smooth_y = FLOOR
+                if abs(vel_y) > 0.003:
+                    vel_y = -abs(vel_y) * BOUNCE
+                else:
+                    vel_y = 0
+
+            # Ceiling bounce
+            if smooth_y < 0.04:
+                smooth_y = 0.04
+                vel_y = abs(vel_y) * 0.3
+
+            # X bounds — gentle wall bounce
+            if smooth_x < 0.08:
+                smooth_x = 0.08
+                vel_x = abs(vel_x) * 0.5
+            if smooth_x > 0.92:
+                smooth_x = 0.92
+                vel_x = -abs(vel_x) * 0.5
+
+            canvas_endpoint._vx = vel_x
 
             await ws.send_text(json.dumps({
                 "x": round(smooth_x, 4),

@@ -2,37 +2,228 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>AURA — JEPA World Model (Canvas)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeBall — JEPA World Model</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Space+Grotesk:wght@300;500;700&display=swap" rel="stylesheet">
 <style>
+  :root {
+    --cyan: #00ffd0;
+    --magenta: #ff2d95;
+    --dark: #060a0f;
+    --panel: rgba(0, 255, 208, 0.04);
+    --border: rgba(0, 255, 208, 0.12);
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0a; display: flex; align-items: center; justify-content: center; height: 100vh; flex-direction: column; }
-  canvas { border: 2px solid #33ffcc; }
-  #status { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 1.1em; color: #ff33cc; }
-  #meter { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); width: 300px; height: 16px; border: 1px solid #33ffcc; }
-  #meter-fill { height: 100%; background: #33ffcc; width: 0%; }
-  #info { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 0.6em; color: #33ffcc44; }
-  #overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(10,10,10,0.9); display: flex; align-items: center; justify-content: center; z-index: 10; cursor: pointer; }
-  #overlay span { font-family: 'Courier New', monospace; color: #33ffcc; font-size: 1.2em; text-align: center; line-height: 2; }
+  body {
+    background: var(--dark);
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--cyan);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Main container — centered box */
+  .container {
+    width: min(90vw, 900px);
+    height: min(80vh, 560px);
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(6, 10, 15, 0.8);
+  }
+
+  /* Header — compact */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .header h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 0.9em;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .header h1 span { color: var(--magenta); }
+  .header .meta {
+    font-size: 0.55em;
+    opacity: 0.35;
+    text-align: right;
+    line-height: 1.5;
+  }
+
+  /* Canvas area */
+  .canvas-wrap {
+    flex: 1;
+    position: relative;
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* Stats panel */
+  .stats {
+    position: absolute;
+    top: 8px;
+    left: 10px;
+    font-size: 0.55em;
+    line-height: 1.7;
+    opacity: 0.3;
+  }
+  .stats .val { color: var(--cyan); opacity: 1; font-weight: 600; }
+  .stats .active { color: var(--magenta); }
+
+  /* Bottom bar — with visible meter */
+  .bottom {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 0.65em;
+  }
+  .bottom .label { opacity: 0.3; text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.8em; }
+  .meter-wrap {
+    flex: 1;
+    height: 10px;
+    background: rgba(0,255,208,0.06);
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .meter-fill {
+    height: 100%;
+    background: var(--cyan);
+    border-radius: 5px;
+    transition: width 0.08s, background 0.15s;
+    width: 0%;
+  }
+  .meter-fill.hot { background: var(--magenta); }
+  .hint { opacity: 0.2; font-size: 0.8em; white-space: nowrap; }
+
+  /* Overlay */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 10, 15, 0.95);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    cursor: pointer;
+  }
+  .overlay-content {
+    text-align: center;
+    max-width: 480px;
+  }
+  .overlay-content h2 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 2.4em;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.6em;
+  }
+  .overlay-content h2 span { color: var(--magenta); }
+  .overlay-content p {
+    font-size: 0.85em;
+    line-height: 1.8;
+    opacity: 0.5;
+    margin-bottom: 1.5em;
+  }
+  .overlay-content .start {
+    display: inline-block;
+    border: 1px solid var(--cyan);
+    padding: 10px 32px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8em;
+    color: var(--cyan);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    transition: all 0.2s;
+  }
+  .overlay-content .start:hover {
+    background: var(--cyan);
+    color: var(--dark);
+  }
+
+  label.music-btn {
+    font-size: 0.75em;
+    opacity: 0.3;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  label.music-btn:hover { opacity: 0.7; }
+  label.music-btn input { display: none; }
 </style>
 </head>
 <body>
 
-<div id="overlay"><span>
-AURA — JEPA World Model<br><br>
-Make noise → ball goes up<br>
-Silence → gravity pulls down<br><br>
-Click to start (allow mic)
-</span></div>
+<div class="overlay" id="overlay">
+  <div class="overlay-content">
+    <h2>Le<span>Ball</span></h2>
+    <p>
+      A neural network predicts ball physics from your voice.<br>
+      Blow to push it up. Silence lets gravity pull it down.<br>
+      12.8M parameter JEPA world model — no hardcoded physics.
+    </p>
+    <div class="start">Click to begin</div>
+  </div>
+</div>
 
-<div id="status">Connecting...</div>
-<canvas id="c" width="800" height="400"></canvas>
-<div id="meter"><div id="meter-fill"></div></div>
-<div id="info">JEPA predicts physics from your audio — neural network IS the engine</div>
+<div class="container">
+  <div class="header">
+    <h1>Le<span>Ball</span> <span style="opacity:0.3;font-weight:300;font-size:0.65em;margin-left:6px">JEPA World Model</span></h1>
+    <div class="meta">
+      12.8M params · LeWM<br>
+      Audio → Predictor → Probe → Position
+    </div>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="c"></canvas>
+    <div class="stats" id="stats">
+      BALL_Y <span class="val" id="s-y">0.00</span><br>
+      RMS <span class="val" id="s-rms">0.00</span><br>
+      JEPA <span class="val" id="s-active">IDLE</span>
+    </div>
+  </div>
+
+  <div class="bottom">
+    <span class="label">Vol</span>
+    <div class="meter-wrap"><div class="meter-fill" id="meter"></div></div>
+    <span class="hint">blow to fly</span>
+    <label class="music-btn">music <input type="file" id="music-file" accept="audio/*"></label>
+  </div>
+</div>
 
 <script>
-const W = 800, H = 400;
+let W, H;
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+
+function resize() {
+  const r = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  W = rect.width;
+  H = rect.height;
+  canvas.width = W * r;
+  canvas.height = H * r;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(r, 0, 0, r, 0, 0);
+}
+resize();
+window.addEventListener('resize', resize);
 
 let audioCtx, analyser, freqData, timeData;
 const ctx16 = new Float32Array(16);
@@ -43,22 +234,23 @@ let bpmEstimate = 0.5;
 let beatTimes = [];
 let ws = null;
 
-// Ball state from server
-let ballX = W/2, ballY = H*0.8;
+let ballX = 0.5, ballY = 0.8;
 let trail = [];
+let particles = [];
+let frameCount = 0;
 
 function connectWS() {
   ws = new WebSocket('ws://localhost:8767/ws-canvas');
-  ws.onopen = () => { document.getElementById('status').textContent = 'Make noise to push the ball up!'; };
+  ws.onopen = () => {};
   ws.onclose = () => { setTimeout(connectWS, 2000); };
-  ws.onerror = () => { document.getElementById('status').textContent = 'Server not running on 8767'; };
+  ws.onerror = () => {};
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.x !== undefined && msg.y !== undefined) {
-      ballX = msg.x * W;
-      ballY = msg.y * H;
-      trail.push({x: ballX, y: ballY, t: Date.now()});
-      if (trail.length > 30) trail.shift();
+      ballX = msg.x;
+      ballY = msg.y;
+      trail.push({ x: ballX * W, y: ballY * H, t: performance.now() });
+      if (trail.length > 40) trail.shift();
     }
   };
 }
@@ -75,71 +267,165 @@ function extractAudioFeatures() {
     if (hiB <= loB) return 0;
     let sum = 0;
     for (let i = loB; i <= hiB; i++) sum += freqData[i];
-    return (sum / ((hiB - loB + 1) * 255));
+    return sum / ((hiB - loB + 1) * 255);
   }
   const bass = bandEnergy(20, 80);
   const mid = bandEnergy(250, 2000);
   const high = bandEnergy(4000, 20000);
   let totalEnergy = 0;
   for (let i = 0; i < freqData.length; i++) totalEnergy += freqData[i];
-  totalEnergy /= (freqData.length * 255);
+  totalEnergy /= freqData.length * 255;
   const flux = Math.max(0, totalEnergy - prevOnsetEnergy);
   const onset = Math.min(1, flux * 8);
   prevOnsetEnergy = totalEnergy * 0.7 + prevOnsetEnergy * 0.3;
-  if (onset > 0.3) { beatTimes.push(performance.now()); while (beatTimes.length > 20) beatTimes.shift(); if (beatTimes.length >= 3) { let iv=0,ct=0; for(let i=1;i<beatTimes.length;i++){iv+=beatTimes[i]-beatTimes[i-1];ct++;} bpmEstimate=Math.min(1,Math.max(0,(60000/(iv/ct)-60)/140)); }}
-  let cN=0,cD=0; for(let i=0;i<freqData.length;i++){cN+=(i*binHz)*freqData[i];cD+=freqData[i];}
-  const centroidNorm = cD>0?Math.min(1,cN/cD/(sr/2)):0;
-  let rmsSum=0; for(let i=0;i<timeData.length;i++){const v=(timeData[i]-128)/128;rmsSum+=v*v;}
-  const rms = Math.min(1, Math.sqrt(rmsSum/timeData.length)*3);
-  const raw = [bass,mid,high,onset,bpmEstimate,centroidNorm,rms];
-  for(let i=0;i<7;i++){emaState[i]=EMA_ALPHA*raw[i]+(1-EMA_ALPHA)*emaState[i];ctx16[i*2]=raw[i];ctx16[i*2+1]=emaState[i];}
-  ctx16[14]=0;ctx16[15]=0;
+  if (onset > 0.3) { beatTimes.push(performance.now()); while (beatTimes.length > 20) beatTimes.shift(); if (beatTimes.length >= 3) { let iv = 0, ct = 0; for (let i = 1; i < beatTimes.length; i++) { iv += beatTimes[i] - beatTimes[i-1]; ct++; } bpmEstimate = Math.min(1, Math.max(0, (60000 / (iv / ct) - 60) / 140)); } }
+  let cN = 0, cD = 0; for (let i = 0; i < freqData.length; i++) { cN += (i * binHz) * freqData[i]; cD += freqData[i]; }
+  const centroidNorm = cD > 0 ? Math.min(1, cN / cD / (sr / 2)) : 0;
+  let rmsSum = 0; for (let i = 0; i < timeData.length; i++) { const v = (timeData[i] - 128) / 128; rmsSum += v * v; }
+  const rms = Math.min(1, Math.sqrt(rmsSum / timeData.length) * 3);
+  const raw = [bass, mid, high, onset, bpmEstimate, centroidNorm, rms];
+  for (let i = 0; i < 7; i++) { emaState[i] = EMA_ALPHA * raw[i] + (1 - EMA_ALPHA) * emaState[i]; ctx16[i * 2] = raw[i]; ctx16[i * 2 + 1] = emaState[i]; }
+  ctx16[14] = 0; ctx16[15] = 0;
   return rms;
 }
 
-function draw() {
-  const rms = (ctx16[12]+ctx16[13])/2;
+function spawnParticles(x, y, count, color) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 3,
+      vy: (Math.random() - 0.7) * 4,
+      life: 0.4 + Math.random() * 0.6,
+      maxLife: 0.4 + Math.random() * 0.6,
+      color,
+      size: 1 + Math.random() * 2,
+    });
+  }
+}
 
-  // Background
-  ctx.fillStyle = '#0a0a0a';
+function draw() {
+  frameCount++;
+  const rms = (ctx16[12] + ctx16[13]) / 2;
+  const bx = ballX * W;
+  const by = ballY * H;
+  const active = rms > 0.05;
+
+  // Background with subtle gradient
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#060a0f');
+  bg.addColorStop(1, '#0a1018');
+  ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
-  // Ground
-  ctx.strokeStyle = '#33ffcc33';
+  // Subtle grid
+  ctx.strokeStyle = 'rgba(0,255,208,0.02)';
+  ctx.lineWidth = 0.5;
+  const gridSize = 40;
+  for (let x = 0; x < W; x += gridSize) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let y = 0; y < H; y += gridSize) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // Ground plane
+  const groundY = H * 0.92;
+  const groundGrad = ctx.createLinearGradient(0, groundY - 2, 0, groundY + 20);
+  groundGrad.addColorStop(0, 'rgba(0,255,208,0.08)');
+  groundGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = groundGrad;
+  ctx.fillRect(0, groundY, W, 20);
+  ctx.strokeStyle = 'rgba(0,255,208,0.15)';
   ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, H*0.92);
-  ctx.lineTo(W, H*0.92);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(W, groundY); ctx.stroke();
 
   // Trail
-  for (let i = 0; i < trail.length; i++) {
-    const alpha = (i / trail.length) * 0.4;
-    const age = (Date.now() - trail[i].t) / 3000;
+  for (let i = 1; i < trail.length; i++) {
+    const age = (performance.now() - trail[i].t) / 2500;
     if (age > 1) continue;
+    const alpha = (1 - age) * 0.35 * (i / trail.length);
     ctx.beginPath();
-    ctx.arc(trail[i].x, trail[i].y, 3, 0, Math.PI*2);
-    ctx.fillStyle = `rgba(51, 255, 204, ${alpha * (1-age)})`;
+    ctx.moveTo(trail[i-1].x, trail[i-1].y);
+    ctx.lineTo(trail[i].x, trail[i].y);
+    ctx.strokeStyle = active
+      ? `rgba(255,45,149,${alpha})`
+      : `rgba(0,255,208,${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Update particles
+  particles = particles.filter(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.08;
+    p.life -= 0.016;
+    if (p.life <= 0) return false;
+    const a = p.life / p.maxLife;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * a, 0, Math.PI * 2);
+    ctx.fillStyle = p.color.replace('A)', a * 0.6 + ')');
+    ctx.fill();
+    return true;
+  });
+
+  // Onset particles
+  if (rms > 0.3 && frameCount % 3 === 0) {
+    spawnParticles(bx, by, 3, 'rgba(255,45,149,A)');
+  }
+
+  // Ball glow
+  const glowRadius = 30 + rms * 60;
+  const glow = ctx.createRadialGradient(bx, by, 0, bx, by, glowRadius);
+  const glowColor = active ? 'rgba(255,45,149,' : 'rgba(0,255,208,';
+  glow.addColorStop(0, glowColor + (0.08 + rms * 0.12) + ')');
+  glow.addColorStop(1, glowColor + '0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(bx - glowRadius, by - glowRadius, glowRadius * 2, glowRadius * 2);
+
+  // Ball
+  const radius = 10 + rms * 6;
+  ctx.beginPath();
+  ctx.arc(bx, by, radius, 0, Math.PI * 2);
+  const ballGrad = ctx.createRadialGradient(bx - radius * 0.3, by - radius * 0.3, 0, bx, by, radius);
+  if (active) {
+    ballGrad.addColorStop(0, '#ff5faa');
+    ballGrad.addColorStop(1, '#cc0066');
+  } else {
+    ballGrad.addColorStop(0, '#33ffd8');
+    ballGrad.addColorStop(1, '#009977');
+  }
+  ctx.fillStyle = ballGrad;
+  ctx.fill();
+
+  // Ball ring
+  ctx.beginPath();
+  ctx.arc(bx, by, radius + 3 + Math.sin(frameCount * 0.05) * 2, 0, Math.PI * 2);
+  ctx.strokeStyle = active ? 'rgba(255,45,149,0.3)' : 'rgba(0,255,208,0.15)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Ball reflection on ground
+  if (by < groundY) {
+    const reflectY = groundY + (groundY - by) * 0.15;
+    const reflAlpha = Math.max(0, 0.08 - (groundY - by) / H * 0.1);
+    ctx.beginPath();
+    ctx.ellipse(bx, reflectY, radius * 0.8, radius * 0.25, 0, 0, Math.PI * 2);
+    ctx.fillStyle = active ? `rgba(255,45,149,${reflAlpha})` : `rgba(0,255,208,${reflAlpha})`;
     ctx.fill();
   }
 
-  // Ball
-  const radius = 12 + rms * 8;
-  ctx.beginPath();
-  ctx.arc(ballX, ballY, radius, 0, Math.PI*2);
-  const grad = ctx.createRadialGradient(ballX-3, ballY-3, 0, ballX, ballY, radius);
-  grad.addColorStop(0, rms > 0.3 ? '#ff33cc' : '#33ffcc');
-  grad.addColorStop(1, rms > 0.3 ? '#cc0099' : '#009977');
-  ctx.fillStyle = grad;
-  ctx.fill();
-  ctx.strokeStyle = '#33ffcc';
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  // Update stats
+  document.getElementById('s-y').textContent = ballY.toFixed(3);
+  document.getElementById('s-rms').textContent = rms.toFixed(3);
+  const sActive = document.getElementById('s-active');
+  sActive.textContent = active ? 'PREDICTING' : 'IDLE';
+  sActive.className = active ? 'val active' : 'val';
 
-  // Audio meter bar at top
-  const meterW = rms * W * 0.8;
-  ctx.fillStyle = rms > 0.3 ? '#ff33cc44' : '#33ffcc22';
-  ctx.fillRect(W*0.1, 10, meterW, 6);
+  // Meter
+  const meter = document.getElementById('meter');
+  meter.style.width = (rms * 100) + '%';
+  meter.className = 'meter-fill' + (rms > 0.3 ? ' hot' : '');
 
   requestAnimationFrame(draw);
 }
@@ -147,23 +433,43 @@ function draw() {
 // Send audio at 10fps
 setInterval(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const rms = extractAudioFeatures();
-  document.getElementById('meter-fill').style.width = (rms*100)+'%';
+  extractAudioFeatures();
   ws.send(JSON.stringify({ audio: Array.from(ctx16) }));
 }, 100);
 
+// Music file
+document.getElementById('music-file').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    audioCtx.decodeAudioData(ev.target.result, (buffer) => {
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(analyser);
+      source.connect(audioCtx.destination);
+      source.start();
+    });
+  };
+  reader.readAsArrayBuffer(file);
+});
+
 // Init
 document.getElementById('overlay').addEventListener('click', async () => {
-  document.getElementById('overlay').remove();
+  document.getElementById('overlay').style.opacity = '0';
+  document.getElementById('overlay').style.transition = 'opacity 0.4s';
+  setTimeout(() => document.getElementById('overlay').remove(), 400);
+
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 2048;
   freqData = new Uint8Array(analyser.frequencyBinCount);
   timeData = new Uint8Array(analyser.fftSize);
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioCtx.createMediaStreamSource(stream).connect(analyser);
-  } catch(e) { document.getElementById('status').textContent = 'Need mic!'; return; }
+  } catch (e) { return; }
+
   connectWS();
   requestAnimationFrame(draw);
 });
