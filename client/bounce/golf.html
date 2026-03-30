@@ -45,7 +45,7 @@ let beatTimes = [];
 
 let ws = null;
 let state = 'connecting'; // connecting, ready, capturing, flight, landed
-const LAUNCH_THRESHOLD = 0.25;
+const LAUNCH_THRESHOLD = 0.15;  // low threshold — any noise triggers
 let captureFrames = [];
 let captureCount = 0;
 const CAPTURE_FRAMES = 5; // capture 0.5s of audio (5 frames at 10fps)
@@ -60,6 +60,7 @@ function connectWS() {
   ws.onerror = () => { document.getElementById('status').textContent = 'Server not running on 8767'; };
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
+    console.log('MSG:', msg.type, msg.frame ? msg.frame.length + ' chars' : '');
 
     if (msg.type === 'ready' || msg.type === 'frame' || msg.type === 'idle') {
       document.getElementById('frame').textContent = msg.frame;
@@ -73,7 +74,9 @@ function connectWS() {
 
     if (msg.type === 'flight') {
       state = 'flight';
-      document.getElementById('status').textContent = 'Ball in flight... (JEPA predicting)';
+      if (!window._flightCount) window._flightCount = 0;
+      window._flightCount++;
+      document.getElementById('status').textContent = 'Ball in flight... frame ' + window._flightCount;
       document.getElementById('frame').textContent = msg.frame;
     }
 
@@ -155,16 +158,22 @@ setInterval(() => {
   document.getElementById('meter-fill').style.width = (rms * 100) + '%';
   document.getElementById('meter-fill').style.background = rms > LAUNCH_THRESHOLD ? '#ff33cc' : '#33ffcc';
 
-  if (state === 'ready') {
-    // Send idle to get current frame
-    ws.send(JSON.stringify({ mode: 'idle' }));
+  if (state === 'flight') return;  // DON'T send anything during flight!
 
-    // Detect shout
+  if (state === 'ready' || state === 'landed') {
+    // Detect shout first
     if (rms > LAUNCH_THRESHOLD) {
       state = 'capturing';
       captureFrames = [Array.from(ctx16)];
       captureCount = 1;
+      window._flightCount = 0;
       document.getElementById('status').textContent = 'Capturing swing...';
+      return;
+    }
+    // Send idle to get current frame (only if not recently sent)
+    if (!window._lastIdle || Date.now() - window._lastIdle > 500) {
+      ws.send(JSON.stringify({ mode: 'idle' }));
+      window._lastIdle = Date.now();
     }
   } else if (state === 'capturing') {
     captureFrames.push(Array.from(ctx16));

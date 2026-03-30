@@ -55,6 +55,27 @@ def get_model():
         first_key = list(probe_sd.keys())[0]
         if first_key.startswith("net."):
             probe = StateProbe(embed_dim=embed_dim)
+        elif "0.weight" in probe_sd and probe_sd["0.weight"].shape[1] == embed_dim:
+            # Deep probe: detect architecture from weight shapes
+            layers = []
+            i = 0
+            while f"{i}.weight" in probe_sd:
+                in_f = probe_sd[f"{i}.weight"].shape[1]
+                out_f = probe_sd[f"{i}.weight"].shape[0]
+                layers.append(nn.Linear(in_f, out_f))
+                i += 1
+                if f"{i}.weight" in probe_sd:  # next is linear, so add activation
+                    # Check if dropout exists
+                    pass
+                elif i < len([k for k in probe_sd if 'weight' in k]):
+                    pass
+            # Rebuild by inferring structure
+            probe = nn.Sequential(
+                nn.Linear(embed_dim, 256), nn.ReLU(), nn.Dropout(0.1),
+                nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.1),
+                nn.Linear(128, 64), nn.ReLU(),
+                nn.Linear(64, 5)
+            )
         else:
             probe = nn.Sequential(
                 nn.Linear(embed_dim, 128), nn.ReLU(),
@@ -196,10 +217,13 @@ async def golf_endpoint(ws: WebSocket):
                 seed_frames = []
                 zero_audio = np.zeros(16, dtype=np.float32)
                 shot_np = np.array(shot_audio, dtype=np.float32)
+                FRAMESKIP = 5  # MUST match training data frameskip
 
                 for i in range(HISTORY_SIZE + 1):
-                    audio = shot_np if i < 4 else zero_audio
-                    renderer.step(audio)
+                    # Run FRAMESKIP physics steps per seed frame (match training!)
+                    for fs in range(FRAMESKIP):
+                        audio = shot_np if i < 4 else zero_audio
+                        renderer.step(audio)
                     frame_str = renderer.render_ascii(audio)
                     idx = frame_to_indices(frame_str)
                     if not isinstance(idx, torch.Tensor):
@@ -277,7 +301,7 @@ async def golf_endpoint(ws: WebSocket):
                         await ws.send_text(json.dumps({
                             "type": "flight", "frame": f
                         }))
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.25)  # slow enough to see each frame
 
                         # Check for early landing (ball reached ground)
                         if renderer.ball_y >= ground_y - 1:
@@ -338,6 +362,125 @@ async def golf_endpoint(ws: WebSocket):
         logger.error("Error: %s", e, exc_info=True)
 
 
+@app.websocket("/ws-canvas")
+async def canvas_endpoint(ws: WebSocket):
+    """Continuous blow-to-fly mode — JEPA predicts ball position from audio each frame.
+    Sends {x, y} for canvas rendering. Blow = ball rises, silence = gravity."""
+    await ws.accept()
+    logger.info("Canvas client connected")
+
+    try:
+        model, probe, device = get_model()
+    except Exception as e:
+        await ws.send_json({"error": str(e)})
+        await ws.close(code=1011)
+        return
+
+    if probe is None:
+        await ws.send_json({"error": "No probe"})
+        await ws.close(code=1011)
+        return
+
+    renderer = BounceWorld()
+    renderer.reset(seed=42)
+    renderer.ball_x = renderer.W / 2
+    renderer.ball_y = renderer.H * 0.8
+
+    # Encode seed frames with frameskip matching training
+    init_audio = np.zeros(16, dtype=np.float32)
+    seed_frames = []
+    FRAMESKIP = 5
+    for _ in range(HISTORY_SIZE):
+        for fs in range(FRAMESKIP):
+            renderer.step(init_audio)
+        frame_str = renderer.render_ascii(init_audio)
+        idx = frame_to_indices(frame_str)
+        if not isinstance(idx, torch.Tensor):
+            idx = torch.from_numpy(idx)
+        seed_frames.append(idx.long())
+
+    with torch.no_grad():
+        seed_t = torch.stack(seed_frames).unsqueeze(0).to(device)
+        seed_emb = model.encode(seed_t)
+        emb_buffer = list(seed_emb[0].unbind(0))
+        zero_a = model.audio_encoder(torch.zeros(1, 16, device=device))[0]
+        audio_emb_buffer = [zero_a.clone() for _ in range(HISTORY_SIZE)]
+
+    frame_count = 0
+    smooth_x, smooth_y = 0.5, 0.8
+    SMOOTH = 0.8  # heavy smoothing to reduce jitter
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            audio_list = msg.get("audio")
+            if audio_list is None or len(audio_list) != 16:
+                continue
+
+            audio_t = torch.tensor([audio_list], dtype=torch.float32, device=device)
+
+            with torch.no_grad():
+                audio_emb = model.audio_encoder(audio_t)[0]
+                audio_emb_buffer.append(audio_emb)
+
+                # Re-encode last rendered frame to keep latents in-distribution
+                # (prevents drift that kills audio responsiveness)
+                renderer.ball_x = smooth_x * renderer.W
+                renderer.ball_y = smooth_y * renderer.H
+                re_frame = renderer.render_ascii(np.array(audio_list, dtype=np.float32))
+                re_idx = frame_to_indices(re_frame)
+                if not isinstance(re_idx, torch.Tensor):
+                    re_idx = torch.from_numpy(re_idx)
+                re_emb = model.encode(re_idx.long().unsqueeze(0).unsqueeze(0).to(device))[0, 0]
+                emb_buffer.append(re_emb)
+
+                ctx = torch.stack(emb_buffer[-HISTORY_SIZE:]).unsqueeze(0)
+                ctx_a = torch.stack(audio_emb_buffer[-HISTORY_SIZE:]).unsqueeze(0)
+
+                pred_emb = model.predict_next(ctx, ctx_a)
+
+                if len(emb_buffer) > HISTORY_SIZE + 10:
+                    emb_buffer = emb_buffer[-(HISTORY_SIZE + 5):]
+                if len(audio_emb_buffer) > HISTORY_SIZE + 10:
+                    audio_emb_buffer = audio_emb_buffer[-(HISTORY_SIZE + 5):]
+
+                state_norm = probe(pred_emb)
+                state = (state_norm[0] * _state_std + _state_mean).cpu().numpy()
+
+            raw_y = float(state[1])
+            rms = (audio_list[12] + audio_list[13]) / 2
+
+            # Lock X to center
+            smooth_x = 0.5
+
+            # Amplify Y movement — stretch probe output to use full screen
+            # The probe outputs ~0.85-0.95 range, map to 0.1-0.9
+            center_y = 0.9  # resting position (near floor)
+            amplified_y = center_y + (raw_y - center_y) * 4.0  # 4x amplification
+            amplified_y = float(np.clip(amplified_y, 0.05, 0.95))
+
+            # During silence: drift to floor
+            if rms < 0.05:
+                smooth_y = 0.9 * smooth_y + 0.1 * 0.92
+            else:
+                smooth_y = 0.6 * smooth_y + 0.4 * amplified_y  # less smoothing, more responsive
+
+            await ws.send_text(json.dumps({
+                "x": round(smooth_x, 4),
+                "y": round(smooth_y, 4)
+            }))
+
+            frame_count += 1
+            if frame_count % 200 == 0:
+                logger.info("Canvas: %d frames, pos=(%.2f, %.2f)", frame_count, smooth_x, smooth_y)
+
+    except WebSocketDisconnect:
+        logger.info("Canvas disconnected after %d frames", frame_count)
+    except Exception as e:
+        logger.error("Canvas error: %s", e, exc_info=True)
+
+
 def main():
     global _checkpoint_path
     parser = argparse.ArgumentParser()
@@ -348,7 +491,7 @@ def main():
     _checkpoint_path = args.checkpoint
 
     import uvicorn
-    logger.info("Starting AURA Golf on %s:%d", args.host, args.port)
+    logger.info("Starting AURA on %s:%d", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
