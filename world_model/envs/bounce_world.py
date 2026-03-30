@@ -85,20 +85,24 @@ class BounceWorld:
         temp = (audio[10] + audio[11]) / 2
         rms = (audio[12] + audio[13]) / 2
 
-        # Audio affects physics — tuned for balanced y-distribution
-        self.gravity = 0.15 + bass * 0.25       # lighter base gravity
-        wind = (mid - 0.5) * 0.3                # gentle horizontal wind
-        self.vel_x += wind * 0.1
+        # Audio affects physics — golf-style: audio = shot power + angle
+        self.gravity = 0.2 + bass * 0.3         # gravity (bass = heavier)
+        wind = (mid - 0.5) * 0.15               # gentle wind from mid freq
+        self.vel_x += wind * 0.05
 
-        # RMS (volume) = upward force — strong enough to counteract gravity
-        if rms > 0.15:
-            lift = (rms - 0.15) * 3.0
-            self.vel_y -= lift * 0.2             # upward push
+        # RMS (volume) = launch power
+        # Centroid (temp) = launch angle (low = flat, high = steep)
+        if rms > 0.2:
+            import math
+            power = (rms - 0.2) * 5.0             # 0-4 units of speed
+            angle = 0.3 + temp * 0.9              # 0.3-1.2 radians from horizontal
+            self.vel_x += power * math.cos(angle) * 0.15
+            self.vel_y -= power * math.sin(angle) * 0.15  # up = negative
 
-        # Onset (clap/beat) = kick
-        if onset > 0.3:
-            kick = min(onset * 2.0, 1.5)
-            self.vel_y -= kick * 0.4
+        # Onset (clap/beat) = extra kick upward
+        if onset > 0.4:
+            kick = min(onset * 1.0, 0.8)
+            self.vel_y -= kick * 0.3
             # Spawn burst particles
             for _ in range(int(onset * 10)):
                 self.particles.append({
