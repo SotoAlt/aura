@@ -38,27 +38,35 @@ def make_shot_audio(power: float, angle: float, rng) -> np.ndarray:
     return np.clip(ctx, 0, 1)
 
 
-def generate_golf_episodes(n_episodes=500, steps_per_ep=100, seed=42):
+def generate_golf_episodes(n_episodes=500, steps_per_ep=100, seed=42, frameskip=5):
+    """Generate golf data with frameskip (paper uses frameskip=5).
+
+    Frameskip means we run the physics for `frameskip` steps but only
+    record every Nth frame. This makes position changes between recorded
+    frames large enough for the probe to detect.
+
+    Paper: frameskip=5, so each "training step" = 5 env steps.
+    Ball moves ~3 pixels per training step instead of ~0.6.
+    """
     env = BounceWorld()
     rng = np.random.default_rng(seed)
 
     all_frames, all_states, all_audios, all_episodes = [], [], [], []
 
-    # Shot profiles: vary power and angle
     profiles = [
-        ("soft_low",   0.3, 0.3),   # soft, flat
-        ("soft_high",  0.3, 0.8),   # soft, steep (lob)
-        ("mid_low",    0.6, 0.3),   # medium, flat
-        ("mid_mid",    0.6, 0.5),   # medium, 45°
-        ("mid_high",   0.6, 0.8),   # medium, steep
-        ("hard_low",   0.9, 0.2),   # hard, flat (drive)
-        ("hard_mid",   0.9, 0.5),   # hard, 45°
-        ("hard_high",  0.9, 0.8),   # hard, steep
-        ("random",     -1, -1),     # random power + angle
-        ("gentle",     0.2, 0.6),   # very gentle lob
+        ("soft_low",   0.3, 0.3),
+        ("soft_high",  0.3, 0.8),
+        ("mid_low",    0.6, 0.3),
+        ("mid_mid",    0.6, 0.5),
+        ("mid_high",   0.6, 0.8),
+        ("hard_low",   0.9, 0.2),
+        ("hard_mid",   0.9, 0.5),
+        ("hard_high",  0.9, 0.8),
+        ("random",     -1, -1),
+        ("gentle",     0.2, 0.6),
     ]
 
-    shot_frames = 4  # audio active for first 4 frames
+    shot_env_frames = 4 * frameskip  # shot lasts 4 training steps = 20 env frames
 
     for ep in range(n_episodes):
         profile_name, base_power, base_angle = profiles[ep % len(profiles)]
@@ -73,35 +81,36 @@ def generate_golf_episodes(n_episodes=500, steps_per_ep=100, seed=42):
         power = np.clip(power, 0.1, 1.0)
         angle = np.clip(angle, 0.05, 0.95)
 
-        # Reset ball at bottom-left
         env.reset(seed=seed + ep)
-        env.ball_x = env.W * 0.1  # left side
-        env.ball_y = env.H - 4     # near bottom
+        env.ball_x = env.W * 0.1
+        env.ball_y = env.H - 4
         env.vel_x = 0
         env.vel_y = 0
 
         shot_audio = make_shot_audio(power, angle, rng)
         zero_audio = np.zeros(16, dtype=np.float32)
 
-        for step_i in range(steps_per_ep):
-            # Shot audio for first few frames, then silence
-            if step_i < shot_frames:
-                audio = shot_audio.copy()
-            else:
-                audio = zero_audio.copy()
+        total_env_steps = steps_per_ep * frameskip
 
+        for env_step in range(total_env_steps):
+            # Shot audio for first shot_env_frames, then silence
+            audio = shot_audio.copy() if env_step < shot_env_frames else zero_audio.copy()
             state = env.step(audio)
-            frame_str = env.render_ascii(audio)
-            frame_idx = frame_to_indices(frame_str)
 
-            all_frames.append(frame_idx)
-            all_states.append(state)
-            all_audios.append(audio)
-            all_episodes.append(ep)
+            # Only record every `frameskip` steps (paper: frameskip=5)
+            if env_step % frameskip == 0:
+                frame_str = env.render_ascii(audio)
+                frame_idx = frame_to_indices(frame_str)
+                all_frames.append(frame_idx)
+                all_states.append(state)
+                # For audio, use the audio that was active during this block
+                # (same as paper: actions are "held" for frameskip steps)
+                all_audios.append(audio)
+                all_episodes.append(ep)
 
         if (ep + 1) % 50 == 0 or ep == 0:
             print(f"  Episode {ep+1}/{n_episodes} ({profile_name}, "
-                  f"power={power:.2f}, angle={angle:.2f})")
+                  f"power={power:.2f}, angle={angle:.2f}, frameskip={frameskip})")
 
     return {
         "frames": np.array(all_frames),
