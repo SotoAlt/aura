@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AURA — Audio Golf (JEPA World Model)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; display: flex; align-items: center; justify-content: center; height: 100vh; flex-direction: column; }
+  #frame { font-family: 'Courier New', monospace; color: #33ffcc; white-space: pre; line-height: 1.1; letter-spacing: 0.05em; text-align: center; }
+  #status { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 1.1em; color: #ff33cc; text-align: center; }
+  #meter { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); width: 300px; height: 20px; border: 1px solid #33ffcc; }
+  #meter-fill { height: 100%; background: #33ffcc; width: 0%; transition: width 0.05s; }
+  #threshold-line { position: absolute; left: 25%; top: 0; height: 100%; width: 2px; background: #ff33cc; }
+  #meter-label { position: fixed; bottom: 55px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 0.7em; color: #33ffcc88; }
+  #info { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); font-family: 'Courier New', monospace; font-size: 0.6em; color: #33ffcc44; }
+  #overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(10,10,10,0.92); display: flex; align-items: center; justify-content: center; z-index: 10; cursor: pointer; }
+  #overlay span { font-family: 'Courier New', monospace; color: #33ffcc; font-size: 1.2em; text-align: center; line-height: 2; }
+</style>
+</head>
+<body>
+
+<div id="overlay"><span>
+AURA — Audio Golf<br><br>
+Shout to hit the ball!<br>
+Louder = more power<br>
+Higher pitch = steeper angle<br><br>
+The AI predicts where it lands.<br><br>
+Click to start (allow mic)
+</span></div>
+
+<div id="status">Connecting...</div>
+<pre id="frame"></pre>
+<div id="meter-label">Volume — shout past the pink line to swing!</div>
+<div id="meter"><div id="meter-fill"></div><div id="threshold-line"></div></div>
+<div id="info">JEPA World Model — neural network predicts ball trajectory from your voice</div>
+
+<script>
+let audioCtx, analyser, freqData, timeData;
+const ctx16 = new Float32Array(16);
+let emaState = new Float32Array(7);
+const EMA_ALPHA = 0.3;
+let prevOnsetEnergy = 0;
+let bpmEstimate = 0.5;
+let beatTimes = [];
+
+let ws = null;
+let state = 'connecting'; // connecting, ready, capturing, flight, landed
+const LAUNCH_THRESHOLD = 0.25;
+let captureFrames = [];
+let captureCount = 0;
+const CAPTURE_FRAMES = 5; // capture 0.5s of audio (5 frames at 10fps)
+
+function connectWS() {
+  ws = new WebSocket('ws://localhost:8767/ws-golf');
+  ws.onopen = () => {
+    state = 'ready';
+    document.getElementById('status').textContent = 'Shout to swing!';
+  };
+  ws.onclose = () => { state = 'connecting'; setTimeout(connectWS, 2000); };
+  ws.onerror = () => { document.getElementById('status').textContent = 'Server not running on 8767'; };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.type === 'ready' || msg.type === 'frame' || msg.type === 'idle') {
+      document.getElementById('frame').textContent = msg.frame;
+    }
+
+    if (msg.type === 'ready') {
+      state = 'ready';
+      document.getElementById('status').textContent =
+        `Hole ${msg.hole || '?'} | Strokes: ${msg.strokes || 0} — Shout to swing!`;
+    }
+
+    if (msg.type === 'flight') {
+      state = 'flight';
+      document.getElementById('status').textContent = 'Ball in flight... (JEPA predicting)';
+      document.getElementById('frame').textContent = msg.frame;
+    }
+
+    if (msg.type === 'landed') {
+      state = 'landed';
+      const dist = msg.distance ? msg.distance.toFixed(1) : '?';
+      document.getElementById('status').textContent =
+        `Landed! Distance to hole: ${dist} | Score: ${msg.score || 0} — Shout for next shot!`;
+      document.getElementById('frame').textContent = msg.frame;
+      // Auto-ready after 2 seconds
+      setTimeout(() => { if (state === 'landed') state = 'ready'; }, 2000);
+    }
+  };
+}
+
+function extractAudioFeatures() {
+  if (!analyser || !freqData) return;
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  const sr = audioCtx.sampleRate;
+  const binHz = sr / analyser.fftSize;
+
+  function bandEnergy(lo, hi) {
+    const loB = Math.max(0, Math.floor(lo / binHz));
+    const hiB = Math.min(freqData.length - 1, Math.ceil(hi / binHz));
+    if (hiB <= loB) return 0;
+    let sum = 0;
+    for (let i = loB; i <= hiB; i++) sum += freqData[i];
+    return (sum / ((hiB - loB + 1) * 255));
+  }
+
+  const bass = bandEnergy(20, 80);
+  const mid = bandEnergy(250, 2000);
+  const high = bandEnergy(4000, 20000);
+
+  let totalEnergy = 0;
+  for (let i = 0; i < freqData.length; i++) totalEnergy += freqData[i];
+  totalEnergy /= (freqData.length * 255);
+  const flux = Math.max(0, totalEnergy - prevOnsetEnergy);
+  const onset = Math.min(1, flux * 8);
+  prevOnsetEnergy = totalEnergy * 0.7 + prevOnsetEnergy * 0.3;
+
+  if (onset > 0.3) {
+    const now = performance.now();
+    beatTimes.push(now);
+    while (beatTimes.length > 20) beatTimes.shift();
+    if (beatTimes.length >= 3) {
+      let intervals = 0, count = 0;
+      for (let i = 1; i < beatTimes.length; i++) { intervals += beatTimes[i] - beatTimes[i-1]; count++; }
+      bpmEstimate = Math.min(1, Math.max(0, (60000 / (intervals / count) - 60) / 140));
+    }
+  }
+
+  let centroidNum = 0, centroidDen = 0;
+  for (let i = 0; i < freqData.length; i++) { centroidNum += (i * binHz) * freqData[i]; centroidDen += freqData[i]; }
+  const centroidNorm = centroidDen > 0 ? Math.min(1, centroidNum / centroidDen / (sr / 2)) : 0;
+
+  let rmsSum = 0;
+  for (let i = 0; i < timeData.length; i++) { const v = (timeData[i] - 128) / 128; rmsSum += v * v; }
+  const rms = Math.min(1, Math.sqrt(rmsSum / timeData.length) * 3);
+
+  const raw = [bass, mid, high, onset, bpmEstimate, centroidNorm, rms];
+  for (let i = 0; i < 7; i++) {
+    emaState[i] = EMA_ALPHA * raw[i] + (1 - EMA_ALPHA) * emaState[i];
+    ctx16[i * 2] = raw[i];
+    ctx16[i * 2 + 1] = emaState[i];
+  }
+  ctx16[14] = 0; ctx16[15] = 0;
+  return rms;
+}
+
+// Main loop at 10 FPS
+setInterval(() => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const rms = extractAudioFeatures() || 0;
+
+  // Volume meter
+  document.getElementById('meter-fill').style.width = (rms * 100) + '%';
+  document.getElementById('meter-fill').style.background = rms > LAUNCH_THRESHOLD ? '#ff33cc' : '#33ffcc';
+
+  if (state === 'ready') {
+    // Send idle to get current frame
+    ws.send(JSON.stringify({ mode: 'idle' }));
+
+    // Detect shout
+    if (rms > LAUNCH_THRESHOLD) {
+      state = 'capturing';
+      captureFrames = [Array.from(ctx16)];
+      captureCount = 1;
+      document.getElementById('status').textContent = 'Capturing swing...';
+    }
+  } else if (state === 'capturing') {
+    captureFrames.push(Array.from(ctx16));
+    captureCount++;
+    if (captureCount >= CAPTURE_FRAMES) {
+      // Average the captured audio frames for a stable shot vector
+      const avgAudio = new Array(16).fill(0);
+      for (const f of captureFrames) {
+        for (let j = 0; j < 16; j++) avgAudio[j] += f[j];
+      }
+      for (let j = 0; j < 16; j++) avgAudio[j] /= captureFrames.length;
+
+      // Send shot!
+      ws.send(JSON.stringify({ mode: 'shot', audio: avgAudio }));
+      state = 'flight';
+      document.getElementById('status').textContent = 'JEPA predicting trajectory...';
+    }
+  }
+  // During 'flight' and 'landed', server streams frames
+}, 100);
+
+// Init
+document.getElementById('overlay').addEventListener('click', async () => {
+  document.getElementById('overlay').remove();
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  timeData = new Uint8Array(analyser.fftSize);
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+  } catch (e) {
+    document.getElementById('status').textContent = 'Need mic!';
+    return;
+  }
+
+  connectWS();
+
+  const el = document.getElementById('frame');
+  function scale() {
+    const s = Math.min(window.innerWidth / (80 * 9.6), (window.innerHeight - 80) / (40 * 11)) * 0.95;
+    el.style.fontSize = (10 * s) + 'px';
+  }
+  scale();
+  window.addEventListener('resize', scale);
+});
+</script>
+</body>
+</html>
