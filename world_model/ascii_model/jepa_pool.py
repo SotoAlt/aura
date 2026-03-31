@@ -396,7 +396,9 @@ if __name__ == "__main__":
     # State Probe
     # =====================================================
     print(f"\n=== State Probe Training: {args.probe_epochs} epochs ===")
-    probe = StateProbe().to(device)
+    actual_state_dim = windows_s.shape[1]  # auto-detect: 10 for pong, 28 for pool
+    probe = StateProbe(state_dim=actual_state_dim).to(device)
+    print(f"Probe output dim: {actual_state_dim}")
     probe_opt = torch.optim.Adam(probe.parameters(), lr=1e-3)
 
     s_mean = windows_s.mean(0)
@@ -442,11 +444,9 @@ if __name__ == "__main__":
     with torch.no_grad():
         pred = probe(all_emb[n_tr:].to(device)).cpu()
         tgt = states_n[n_tr:]
-        for ball in range(7):
-            bx = ball * 4
-            cx = np.corrcoef(pred[:, bx].numpy(), tgt[:, bx].numpy())[0, 1]
-            cy = np.corrcoef(pred[:, bx+1].numpy(), tgt[:, bx+1].numpy())[0, 1]
-            print(f"  Ball {ball}: x_corr={cx:+.3f}  y_corr={cy:+.3f}")
+        for i in range(actual_state_dim):
+            c = np.corrcoef(pred[:, i].numpy(), tgt[:, i].numpy())[0, 1]
+            print(f"  state[{i}]: corr={c:+.3f}")
 
     ckpt = torch.load(args.checkpoint, weights_only=False)
     ckpt["probe"] = probe.state_dict()
