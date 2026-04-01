@@ -121,7 +121,8 @@ def train(cfg_name: str, data_dir: str, total_steps: int,
     print(f'Parameters: {param_count:,} ({param_count / 1e6:.1f}M)')
 
     # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['lr'], betas=(0.9, 0.999))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['lr'], betas=(0.9, 0.999),
+                                   weight_decay=cfg.get('weight_decay', 0.01))
 
     # Data
     num_workers = 0 if device.type == 'cpu' else 2

@@ -3,184 +3,367 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LeBall Pong — JEPA World Model</title>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+<title>LeBall — JEPA World Model</title>
+<link href="https://fonts.googleapis.com/css2?family=Anybody:wght@400;700;900&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0a0c10;
-    --court: #101520;
-    --line: rgba(255,255,255,0.06);
-    --ball: #e8e4f0;
-    --paddle: #c8c4d8;
-    --ghost: rgba(200,160,60,0.5);
-    --ghost-trail: rgba(200,160,60,0.15);
-    --gold: #c4973b;
-    --gold-dim: #7a6028;
-    --accent: #e84060;
-    --text: #a0a0b0;
-    --text-dim: #505060;
+    --bg: #08080c;
+    --surface: #0c0e14;
+    --amber: #f0a030;
+    --amber-dim: #805818;
+    --amber-glow: rgba(240,160,48,0.15);
+    --cyan-ghost: #40e8d0;
+    --ghost-glow: rgba(64,232,208,0.12);
+    --white: #e8e8f0;
+    --dim: #383848;
+    --scanline: rgba(0,0,0,0.06);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
   body {
     background: var(--bg);
-    font-family: 'DM Mono', monospace;
-    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--dim);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    background-image: radial-gradient(ellipse at 50% 40%, rgba(240,160,48,0.03) 0%, transparent 60%);
   }
 
-  .frame {
-    width: min(94vw, 880px);
+  .shell {
+    width: min(92vw, 860px);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 10px;
   }
-  .top {
+
+  /* Title row */
+  .title-row {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
-    padding: 0 2px;
+    align-items: flex-end;
+    padding: 0 4px 2px;
   }
-  .top h1 {
-    font-family: 'Cormorant Garamond', serif;
-    font-weight: 700;
-    font-size: 1.2em;
-    color: var(--gold);
-    letter-spacing: 0.06em;
+  .brand {
+    font-family: 'Anybody', sans-serif;
+    font-weight: 900;
+    font-size: 1.5em;
+    color: var(--amber);
+    letter-spacing: 0.08em;
+    text-shadow: 0 0 20px var(--amber-glow);
+    line-height: 1;
   }
-  .top h1 em { font-style: normal; color: var(--ball); font-weight: 400; }
-  .top .tag { font-size: 0.5em; color: var(--text-dim); letter-spacing: 0.06em; }
+  .brand small {
+    font-weight: 400;
+    font-size: 0.45em;
+    color: var(--amber-dim);
+    letter-spacing: 0.12em;
+    display: block;
+    margin-top: 2px;
+  }
+  .meta-col {
+    text-align: right;
+    font-size: 0.55em;
+    line-height: 1.6;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+  }
+  .meta-col .lit { color: var(--amber-dim); }
 
-  .court-wrap {
+  /* Score strip */
+  .score-strip {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 32px;
+    padding: 4px 0;
+    font-family: 'Anybody', sans-serif;
+    font-weight: 700;
+    font-size: 1.8em;
+    color: var(--amber);
+    text-shadow: 0 0 12px var(--amber-glow);
+    letter-spacing: 0.15em;
+  }
+  .score-strip .vs {
+    font-size: 0.4em;
+    font-weight: 400;
+    color: var(--dim);
+    letter-spacing: 0.2em;
+    text-shadow: none;
+  }
+
+  /* Monitor bezel */
+  .monitor {
     position: relative;
-    border: 1px solid rgba(255,255,255,0.05);
-    border-radius: 4px;
+    border-radius: 6px;
+    padding: 6px;
+    background: linear-gradient(180deg, #1a1a20 0%, #101018 100%);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.04) inset,
+      0 -1px 0 rgba(0,0,0,0.6) inset,
+      0 6px 24px rgba(0,0,0,0.7);
+  }
+  .screen {
+    border-radius: 3px;
     overflow: hidden;
-    background: var(--court);
+    position: relative;
   }
   canvas { display: block; width: 100%; cursor: none; }
 
-  .score-bar {
+  /* CRT scanlines overlay */
+  .screen::after {
+    content: '';
     position: absolute;
-    top: 0; left: 0; right: 0;
-    display: flex;
-    justify-content: center;
-    gap: 40px;
-    padding: 6px 0;
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 1.6em;
-    font-weight: 700;
-    color: rgba(255,255,255,0.12);
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      var(--scanline) 0px, var(--scanline) 1px,
+      transparent 1px, transparent 3px
+    );
     pointer-events: none;
+    mix-blend-mode: multiply;
+    opacity: 0.4;
   }
 
-  .hud {
+  /* Corner LEDs */
+  .led {
     position: absolute;
-    bottom: 6px;
-    right: 8px;
-    font-size: 0.5em;
-    color: var(--text-dim);
-    text-align: right;
-    line-height: 1.7;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 6px var(--amber-glow);
+    opacity: 0.6;
   }
-  .hud .v { color: var(--gold); }
+  .led.tl { top: 10px; left: 10px; }
+  .led.tr { top: 10px; right: 10px; }
 
-  .bottom {
+  /* HUD overlay on screen */
+  .hud-overlay {
+    position: absolute;
+    bottom: 8px;
+    left: 0; right: 0;
     display: flex;
     justify-content: space-between;
+    padding: 0 12px;
+    font-size: 0.52em;
+    color: var(--amber-dim);
+    pointer-events: none;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .hud-overlay .g { color: var(--cyan-ghost); }
+
+  /* Footer */
+  .foot {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px 0;
+  }
+  .mode-toggle {
+    display: flex;
+    gap: 6px;
+  }
+  .mode-toggle button {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--dim);
+    color: var(--dim);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65em;
+    padding: 7px 16px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.25s;
+    letter-spacing: 0.06em;
+  }
+  .mode-toggle button:hover {
+    border-color: var(--amber-dim);
+    color: var(--amber-dim);
+  }
+  .mode-toggle button.active {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: rgba(240,160,48,0.06);
+    text-shadow: 0 0 10px var(--amber-glow);
+    box-shadow: 0 0 12px rgba(240,160,48,0.08);
+  }
+  .foot-info {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    font-size: 0.48em;
+    color: var(--dim);
+    opacity: 0.5;
     padding: 0 2px;
-    font-size: 0.5em;
-    color: var(--text-dim);
   }
 
+  /* Overlay */
   .overlay {
     position: fixed; inset: 0;
-    background: rgba(10,12,16,0.96);
+    background: rgba(8,8,12,0.97);
     display: flex; align-items: center; justify-content: center;
     z-index: 100; cursor: pointer;
+    animation: fadeIn 0.6s ease;
   }
-  .ov h2 {
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 2.8em; font-weight: 700;
-    color: var(--gold); letter-spacing: 0.1em;
-    margin-bottom: 0.3em;
+  @keyframes fadeIn { from { opacity: 0; } }
+  .ov-box { text-align: center; max-width: 420px; }
+  .ov-box h2 {
+    font-family: 'Anybody', sans-serif;
+    font-size: 3.2em;
+    font-weight: 900;
+    color: var(--amber);
+    letter-spacing: 0.1em;
+    text-shadow: 0 0 40px var(--amber-glow);
+    margin-bottom: 0.15em;
+    line-height: 1;
   }
-  .ov h2 em { font-style: normal; color: var(--ball); font-weight: 400; }
-  .ov p { font-size: 0.75em; line-height: 1.8; color: var(--text-dim); margin-bottom: 1.4em; max-width: 400px; text-align: center; }
-  .ov .btn {
-    display: inline-block; border: 1px solid var(--gold-dim);
-    color: var(--gold); padding: 8px 32px;
-    font-family: 'DM Mono', monospace; font-size: 0.65em;
-    letter-spacing: 0.15em; text-transform: uppercase;
+  .ov-box .sub {
+    font-size: 0.7em;
+    color: var(--amber-dim);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 1.8em;
+  }
+  .ov-box p {
+    font-size: 0.72em;
+    line-height: 1.9;
+    color: var(--dim);
+    margin-bottom: 2em;
+  }
+  .ov-box p em { font-style: normal; color: var(--cyan-ghost); }
+  .ov-box .go {
+    display: inline-block;
+    border: 1px solid var(--amber-dim);
+    color: var(--amber);
+    padding: 10px 40px;
+    font-family: 'Anybody', sans-serif;
+    font-weight: 700;
+    font-size: 0.8em;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
     transition: all 0.2s;
   }
-  .ov .btn:hover { background: var(--gold); color: var(--bg); }
+  .ov-box .go:hover { background: var(--amber); color: var(--bg); box-shadow: 0 0 20px var(--amber-glow); }
 </style>
 </head>
 <body>
 
 <div class="overlay" id="overlay">
-  <div class="ov">
-    <h2>Le<em>Ball</em></h2>
+  <div class="ov-box">
+    <h2>LEBALL</h2>
+    <div class="sub">JEPA World Model</div>
     <p>
       Move your mouse to control the right paddle.<br>
-      The gold ghost ball shows where the AI predicts the ball will go.<br>
-      13M param JEPA world model — predicts Pong physics.
+      The <em>cyan ghost</em> shows the JEPA world model's<br>
+      1-step prediction of the ball's next position.<br><br>
+      13M params &middot; LeWM architecture &middot; 192-dim latent &middot; trained probe
     </p>
-    <div class="btn">Play</div>
+    <div class="go">Start</div>
   </div>
 </div>
 
-<div class="frame">
-  <div class="top">
-    <h1>Le<em>Ball</em> Pong</h1>
-    <span class="tag">JEPA World Model · 13M params · ghost = prediction</span>
-  </div>
-  <div class="court-wrap">
-    <canvas id="c"></canvas>
-    <div class="score-bar">
-      <span id="score-l">0</span>
-      <span id="score-r">0</span>
+<div class="shell">
+  <div class="title-row">
+    <div class="brand">
+      LEBALL
+      <small>JEPA World Model</small>
     </div>
-    <div class="hud">
-      JEPA <span class="v" id="h-jepa">ready</span><br>
-      accuracy <span class="v" id="h-acc">&mdash;</span><br>
-      rally <span class="v" id="h-rally">0</span>
+    <div class="meta-col">
+      JEPA <span class="lit" id="h-jepa">standby</span><br>
+      accuracy <span class="lit" id="h-acc">&mdash;</span><br>
+      baseline <span class="lit" id="h-base">&mdash;</span><br>
+      rally <span class="lit" id="h-rally">0</span>
     </div>
   </div>
-  <div class="bottom">
-    <span>mouse = right paddle · gold ghost = JEPA prediction</span>
-    <span>AI controls left paddle</span>
+
+  <div class="score-strip">
+    <span id="score-l">0</span>
+    <span class="vs">VS</span>
+    <span id="score-r">0</span>
+  </div>
+
+  <div class="monitor">
+    <div class="led tl"></div>
+    <div class="led tr"></div>
+    <div class="screen">
+      <canvas id="c"></canvas>
+      <div class="hud-overlay" id="hud">
+        <span id="hud-l">AI paddle</span>
+        <span id="hud-c"><span class="g">&#9679;</span> jepa prediction</span>
+        <span>your paddle</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="mode-toggle">
+      <button id="mode-ghost" class="active" onclick="setMode('ghost')">1 GHOST</button>
+      <button id="mode-ai" onclick="setMode('ai')">2 JEPA AI</button>
+    </div>
+    <div class="foot-info">
+      <span>mouse = right paddle · keys 1/2 switch modes</span>
+      <span id="mode-desc">ghost = prediction overlay</span>
+    </div>
   </div>
 </div>
 
 <script>
-// Physics constants matching pong_world.py
 const CW = 1.0, CH = 0.6;
-const BALL_R = 0.012;
+const BALL_R = 0.014;
 const PAD_H = 0.12, PAD_W = 0.015, PAD_M = 0.03;
-const PAD_SPEED = 0.02;
-const BALL_SMIN = 0.015, BALL_SMAX = 0.025;
+const PAD_SPEED = 0.018;
+const BALL_SMIN = 0.013;
+const BALL_SMAX = 0.022;
 
 let W, H;
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-// State
-let ball = {x: 0.5, y: 0.3, vx: 0.02, vy: 0.005};
+let ball = {x: 0.5, y: 0.3, vx: 0.014, vy: 0.004};
 let padL = 0.3, padR = 0.3;
 let scoreL = 0, scoreR = 0;
 let rally = 0;
 let mouseY = 0.3;
-let ghostBall = null; // {x, y} — JEPA predicted position
+let ghostBall = null;
 let ghostTrail = [];
-let predAccuracies = [];
 let ws = null;
 let frameCount = 0;
+let physicsTick = 0;
+let time = 0;
+let gameMode = 'ghost'; // 'ghost' | 'ai'
+let lastRally = 0;
+
+const MODE_DESC = {
+  ghost: 'real physics + cyan ghost shows JEPA 1-step prediction',
+  ai: 'left paddle tracks JEPA prediction — play against the model'
+};
+const MODE_HUD_L = {
+  ghost: 'AI paddle',
+  ai: '<span class="g">JEPA</span> paddle'
+};
+const MODE_HUD_C = {
+  ghost: '<span class="g">&#9679;</span> jepa prediction',
+  ai: '<span class="g">&#9679;</span> jepa prediction'
+};
+const MODE_LABELS = { ghost: 'GHOST', ai: 'JEPA AI' };
+const MODE_COLORS = { ghost: 'rgba(240,160,48,0.3)', ai: 'rgba(64,232,208,0.3)' };
+
+function setMode(mode) {
+  gameMode = mode;
+  document.querySelectorAll('.mode-toggle button').forEach(b => b.classList.remove('active'));
+  document.getElementById('mode-' + mode).classList.add('active');
+  document.getElementById('mode-desc').textContent = MODE_DESC[mode];
+  document.getElementById('hud-l').innerHTML = MODE_HUD_L[mode];
+  document.getElementById('hud-c').innerHTML = MODE_HUD_C[mode];
+  // Reset on mode change
+  scoreL = 0; scoreR = 0;
+  document.getElementById('score-l').textContent = '0';
+  document.getElementById('score-r').textContent = '0';
+  resetBall();
+}
 
 function resize() {
   const r = window.devicePixelRatio || 1;
@@ -198,7 +381,7 @@ function ts(x, y) { return [x / CW * W, y / CH * H]; }
 function resetBall(dir) {
   ball.x = 0.5; ball.y = 0.3;
   const speed = BALL_SMIN + Math.random() * (BALL_SMAX - BALL_SMIN);
-  const angle = (Math.random() - 0.5) * 0.8;
+  const angle = (Math.random() - 0.5) * 0.7;
   ball.vx = (dir || (Math.random() > 0.5 ? 1 : -1)) * speed * Math.cos(angle);
   ball.vy = speed * Math.sin(angle);
   rally = 0;
@@ -206,163 +389,229 @@ function resetBall(dir) {
   ghostTrail = [];
 }
 
-function physics() {
-  // AI paddle (left) — tracks ball with slight delay
-  const targetL = ball.y;
-  const dl = Math.max(-1, Math.min(1, (targetL - padL) / PAD_SPEED)) * PAD_SPEED * 0.8;
-  padL = Math.max(PAD_H/2, Math.min(CH - PAD_H/2, padL + dl));
-
-  // Player paddle (right) — mouse
-  const targetR = mouseY;
-  const dr = Math.max(-1, Math.min(1, (targetR - padR) / PAD_SPEED)) * PAD_SPEED;
-  padR = Math.max(PAD_H/2, Math.min(CH - PAD_H/2, padR + dr));
-
-  // Move ball
+function physicsReal() {
+  // Standard ball + paddle physics
   ball.x += ball.vx;
   ball.y += ball.vy;
 
-  // Top/bottom bounce
   if (ball.y - BALL_R < 0) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
   if (ball.y + BALL_R > CH) { ball.y = CH - BALL_R; ball.vy = -Math.abs(ball.vy); }
 
-  // Left paddle
   const lx = PAD_M + PAD_W;
   if (ball.x - BALL_R < lx && ball.vx < 0 && Math.abs(ball.y - padL) < PAD_H/2 + BALL_R) {
     ball.x = lx + BALL_R;
     ball.vx = Math.abs(ball.vx) * 1.02;
-    ball.vy += ((ball.y - padL) / (PAD_H/2)) * 0.005;
+    ball.vy += ((ball.y - padL) / (PAD_H/2)) * 0.004;
     rally++;
   }
 
-  // Right paddle
   const rx = CW - PAD_M - PAD_W;
   if (ball.x + BALL_R > rx && ball.vx > 0 && Math.abs(ball.y - padR) < PAD_H/2 + BALL_R) {
     ball.x = rx - BALL_R;
     ball.vx = -Math.abs(ball.vx) * 1.02;
-    ball.vy += ((ball.y - padR) / (PAD_H/2)) * 0.005;
+    ball.vy += ((ball.y - padR) / (PAD_H/2)) * 0.004;
     rally++;
   }
 
-  // Score
   if (ball.x < 0) { scoreR++; document.getElementById('score-r').textContent = scoreR; resetBall(1); }
   if (ball.x > CW) { scoreL++; document.getElementById('score-l').textContent = scoreL; resetBall(-1); }
 
-  // Cap speed
   const spd = Math.sqrt(ball.vx*ball.vx + ball.vy*ball.vy);
   if (spd > BALL_SMAX * 1.5) { const s = BALL_SMAX*1.5/spd; ball.vx*=s; ball.vy*=s; }
+}
 
-  document.getElementById('h-rally').textContent = rally;
+function movePaddle(current, target, factor) {
+  const d = Math.max(-1, Math.min(1, (target - current) / PAD_SPEED)) * PAD_SPEED * factor;
+  return Math.max(PAD_H/2, Math.min(CH - PAD_H/2, current + d));
+}
+
+function physics() {
+  padR = movePaddle(padR, mouseY, 1.0);
+
+  if (gameMode === 'ai') {
+    // JEPA controls left paddle — tracks predicted ball position instead of actual
+    padL = movePaddle(padL, ghostBall ? ghostBall.y : ball.y, 0.9);
+  } else {
+    // GHOST mode — simple AI tracks actual ball
+    padL = movePaddle(padL, ball.y, 0.7);
+  }
+
+  // Real physics always runs (no fake JEPA-as-physics mode)
+  physicsReal();
+
+  if (rally !== lastRally) {
+    lastRally = rally;
+    document.getElementById('h-rally').textContent = rally;
+  }
 }
 
 function draw() {
   frameCount++;
+  time += 0.016;
 
   // Background
-  ctx.fillStyle = '#101520';
+  ctx.fillStyle = '#0a0c14';
   ctx.fillRect(0, 0, W, H);
 
-  // Center line
-  const cx = W / 2;
-  ctx.setLineDash([4, 6]);
-  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  // Subtle radial glow at center
+  const cg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.45);
+  cg.addColorStop(0, 'rgba(240,160,48,0.02)');
+  cg.addColorStop(1, 'transparent');
+  ctx.fillStyle = cg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Center dashed line
+  ctx.setLineDash([3, 8]);
+  ctx.strokeStyle = 'rgba(240,160,48,0.06)';
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W/2, 0); ctx.lineTo(W/2, H); ctx.stroke();
   ctx.setLineDash([]);
 
-  // Top/bottom lines
-  ctx.fillStyle = 'rgba(255,255,255,0.03)';
-  ctx.fillRect(0, 0, W, 2);
-  ctx.fillRect(0, H-2, W, 2);
+  // Center circle
+  ctx.beginPath(); ctx.arc(W/2, H/2, 30, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(240,160,48,0.04)'; ctx.lineWidth = 1; ctx.stroke();
+
+  // Border lines
+  ctx.strokeStyle = 'rgba(240,160,48,0.08)';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(1, 1, W-2, H-2);
 
   // Ghost trail
   for (let i = 1; i < ghostTrail.length; i++) {
-    const a = (i / ghostTrail.length) * 0.3;
+    const a = (i / ghostTrail.length) * 0.5;
     const [x0, y0] = ts(ghostTrail[i-1].x, ghostTrail[i-1].y);
     const [x1, y1] = ts(ghostTrail[i].x, ghostTrail[i].y);
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
-    ctx.strokeStyle = `rgba(200,160,60,${a})`;
-    ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = `rgba(64,232,208,${a})`;
+    ctx.lineWidth = 1.5; ctx.stroke();
   }
 
-  // Ghost ball (JEPA prediction)
+  // Ghost ball — JEPA prediction overlay
   if (ghostBall) {
     const [gx, gy] = ts(ghostBall.x, ghostBall.y);
     const gr = BALL_R / CW * W;
-    // Glow
-    const gg = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr * 3);
-    gg.addColorStop(0, 'rgba(200,160,60,0.12)');
+    // Outer glow
+    const gg = ctx.createRadialGradient(gx, gy, gr, gx, gy, gr * 5);
+    gg.addColorStop(0, 'rgba(64,232,208,0.10)');
     gg.addColorStop(1, 'transparent');
     ctx.fillStyle = gg;
-    ctx.fillRect(gx - gr*3, gy - gr*3, gr*6, gr*6);
-    // Ball outline
-    ctx.beginPath(); ctx.arc(gx, gy, gr, 0, Math.PI*2);
-    ctx.strokeStyle = 'rgba(200,160,60,0.5)';
-    ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath(); ctx.arc(gx, gy, gr + 4, 0, Math.PI*2);
-    ctx.strokeStyle = 'rgba(200,160,60,0.2)';
-    ctx.lineWidth = 0.5; ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(gx, gy, gr*5, 0, Math.PI*2); ctx.fill();
+    // Core
+    ctx.beginPath(); ctx.arc(gx, gy, gr * 1.2, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(64,232,208,0.2)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(64,232,208,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
+    // Pulsing ring
+    const pulse = 1 + Math.sin(time * 6) * 0.3;
+    ctx.beginPath(); ctx.arc(gx, gy, gr * 2 * pulse, 0, Math.PI*2);
+    ctx.strokeStyle = `rgba(64,232,208,${0.15 + Math.sin(time*6)*0.05})`;
+    ctx.lineWidth = 0.8; ctx.stroke();
+    // Label
+    ctx.font = '9px IBM Plex Mono';
+    ctx.fillStyle = 'rgba(64,232,208,0.4)';
+    ctx.fillText(gameMode === 'ai' ? 'JEPA AI' : 'JEPA', gx + gr*2 + 4, gy + 3);
   }
 
   // Paddles
-  function drawPaddle(nx, ny) {
+  function drawPad(nx, ny, jepaCtrl) {
     const [px, py] = ts(nx, ny);
-    const pw = Math.max(3, PAD_W / CW * W);
+    const pw = Math.max(4, PAD_W / CW * W);
     const ph = PAD_H / CH * H;
     const y0 = py - ph/2;
     // Glow
-    ctx.shadowColor = 'rgba(200,200,220,0.15)';
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = '#b0b0c0';
+    const pg = ctx.createLinearGradient(px, y0, px, y0 + ph);
+    if (jepaCtrl) {
+      pg.addColorStop(0, 'rgba(64,232,208,0.0)');
+      pg.addColorStop(0.5, 'rgba(64,232,208,0.12)');
+      pg.addColorStop(1, 'rgba(64,232,208,0.0)');
+    } else {
+      pg.addColorStop(0, 'rgba(240,160,48,0.0)');
+      pg.addColorStop(0.5, 'rgba(240,160,48,0.08)');
+      pg.addColorStop(1, 'rgba(240,160,48,0.0)');
+    }
+    ctx.fillStyle = pg;
+    ctx.fillRect(px - pw*2, y0, pw*4, ph);
+    // Paddle body
+    const pbg = ctx.createLinearGradient(px - pw/2, 0, px + pw/2, 0);
+    if (jepaCtrl) {
+      pbg.addColorStop(0, '#20a090');
+      pbg.addColorStop(0.5, '#40e8d0');
+      pbg.addColorStop(1, '#20a090');
+    } else {
+      pbg.addColorStop(0, '#d0a040');
+      pbg.addColorStop(0.5, '#f0c060');
+      pbg.addColorStop(1, '#d0a040');
+    }
+    ctx.fillStyle = pbg;
     ctx.fillRect(px - pw/2, y0, pw, ph);
-    ctx.shadowBlur = 0;
-    // Highlight
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
-    ctx.fillRect(px - pw/2, y0, pw, 2);
+    // Edge highlight
+    ctx.fillStyle = jepaCtrl ? 'rgba(64,232,208,0.2)' : 'rgba(255,255,255,0.15)';
+    ctx.fillRect(px - pw/2, y0, pw, 1.5);
+    // JEPA label on paddle
+    if (jepaCtrl) {
+      ctx.font = '8px IBM Plex Mono';
+      ctx.fillStyle = 'rgba(64,232,208,0.4)';
+      ctx.fillText('JEPA', px - 12, y0 - 5);
+    }
   }
-  drawPaddle(PAD_M, padL);
-  drawPaddle(CW - PAD_M, padR);
+  const leftIsJepa = gameMode === 'ai';
+  drawPad(PAD_M, padL, leftIsJepa);
+  drawPad(CW - PAD_M, padR, false);
 
-  // Ball
+  // Ball — always real physics, always amber
   const [bx, by] = ts(ball.x, ball.y);
   const br = BALL_R / CW * W;
-  // Glow
-  ctx.shadowColor = 'rgba(230,230,250,0.3)';
-  ctx.shadowBlur = 12;
+  ctx.shadowColor = 'rgba(240,200,100,0.5)';
+  ctx.shadowBlur = 16;
   ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI*2);
-  const bg = ctx.createRadialGradient(bx - br*0.3, by - br*0.3, 0, bx, by, br);
-  bg.addColorStop(0, '#ffffff');
-  bg.addColorStop(1, '#c0c0d0');
-  ctx.fillStyle = bg;
+  const bbg = ctx.createRadialGradient(bx - br*0.3, by - br*0.3, 0, bx, by, br);
+  bbg.addColorStop(0, '#fffcf0');
+  bbg.addColorStop(0.6, '#f0d080');
+  bbg.addColorStop(1, '#c09030');
+  ctx.fillStyle = bbg;
   ctx.fill();
   ctx.shadowBlur = 0;
+  // Motion streak
+  const spdN = Math.sqrt(ball.vx*ball.vx + ball.vy*ball.vy);
+  const streakLen = spdN * 80;
+  if (streakLen > 2) {
+    const nx = -ball.vx / spdN;
+    const ny = -ball.vy / spdN;
+    const sg = ctx.createLinearGradient(bx, by, bx + nx*streakLen, by + ny*streakLen);
+    sg.addColorStop(0, 'rgba(240,180,60,0.25)');
+    sg.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.moveTo(bx + ny*br*0.6, by - nx*br*0.6);
+    ctx.lineTo(bx + nx*streakLen, by + ny*streakLen);
+    ctx.lineTo(bx - ny*br*0.6, by + nx*br*0.6);
+    ctx.fillStyle = sg;
+    ctx.fill();
+  }
 
-  // Ball motion trail
-  ctx.beginPath();
-  ctx.arc(bx - ball.vx/CW*W*2, by - ball.vy/CH*H*2, br*0.5, 0, Math.PI*2);
-  ctx.fillStyle = 'rgba(200,200,220,0.1)';
-  ctx.fill();
+  // Mode badge (top center)
+  ctx.font = '500 10px IBM Plex Mono';
+  ctx.fillStyle = MODE_COLORS[gameMode];
+  ctx.textAlign = 'center';
+  ctx.fillText(MODE_LABELS[gameMode], W/2, 14);
+  ctx.textAlign = 'start';
 
   requestAnimationFrame(draw);
 }
 
-// Game loop — physics at fixed rate
+// Physics at ~30fps (slowed from 60)
 setInterval(() => {
   physics();
-
-  // Send state to server every 5 frames (frameskip aligned)
-  if (frameCount % 5 === 0 && ws && ws.readyState === WebSocket.OPEN) {
+  physicsTick++;
+  if (physicsTick % 5 === 0 && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       ball_x: ball.x, ball_y: ball.y,
       ball_vx: ball.vx, ball_vy: ball.vy,
       pad_l: padL, pad_r: padR,
-      rally: rally
+      rally: rally,
+      mode: gameMode
     }));
   }
-}, 16); // ~60fps physics
+}, 33); // ~30fps physics
 
-// WebSocket
 function connectWS() {
   ws = new WebSocket('ws://localhost:8769/ws-pong');
   ws.onclose = () => setTimeout(connectWS, 2000);
@@ -371,31 +620,33 @@ function connectWS() {
     if (msg.ghost_x !== undefined) {
       ghostBall = {x: msg.ghost_x, y: msg.ghost_y};
       ghostTrail.push({x: msg.ghost_x, y: msg.ghost_y});
-      if (ghostTrail.length > 15) ghostTrail.shift();
-
+      if (ghostTrail.length > 20) ghostTrail.shift();
       document.getElementById('h-jepa').textContent = 'active';
-      if (msg.accuracy !== undefined) {
+      if (msg.accuracy !== undefined && msg.accuracy !== null) {
         document.getElementById('h-acc').textContent = msg.accuracy.toFixed(0) + '%';
+      }
+      if (msg.baseline !== undefined && msg.baseline !== null) {
+        document.getElementById('h-base').textContent = msg.baseline.toFixed(0) + '%';
       }
     }
   };
 }
 
-// Mouse
 canvas.addEventListener('mousemove', (e) => {
   const rect = canvas.getBoundingClientRect();
   mouseY = ((e.clientY - rect.top) / rect.height) * CH;
 });
 
-// Init
+document.addEventListener('keydown', (e) => {
+  if (e.key === '1') setMode('ghost');
+  if (e.key === '2') setMode('ai');
+});
+
 document.getElementById('overlay').addEventListener('click', () => {
   const ov = document.getElementById('overlay');
-  ov.style.opacity = '0'; ov.style.transition = 'opacity 0.3s';
-  setTimeout(() => ov.remove(), 300);
-  resize();
-  resetBall();
-  connectWS();
-  requestAnimationFrame(draw);
+  ov.style.opacity = '0'; ov.style.transition = 'opacity 0.5s';
+  setTimeout(() => ov.remove(), 500);
+  resize(); resetBall(); connectWS(); requestAnimationFrame(draw);
 });
 window.addEventListener('resize', resize);
 </script>

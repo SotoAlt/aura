@@ -48,8 +48,6 @@ def get_model():
 
     if "probe" in ckpt:
         probe_sd = ckpt["probe"]
-        # Detect probe architecture
-        first_weight = [k for k in probe_sd if "weight" in k][0]
         out_dim = list(probe_sd.values())[-2].shape[0]  # last weight's output
         probe = StateProbe(embed_dim=ckpt.get("embed_dim", EMBED_DIM), state_dim=out_dim)
         try:
@@ -109,7 +107,9 @@ async def pong_endpoint(ws: WebSocket):
     action_buffer = []
     prev_ghost = None
     prev_actual = None
+    prev_paddles = None
     accuracies = []
+    baseline_accuracies = []
     frame_count = 0
 
     try:
@@ -123,6 +123,14 @@ async def pong_endpoint(ws: WebSocket):
             bvy = msg.get("ball_vy", 0)
             pl = msg.get("pad_l", 0.3)
             pr = msg.get("pad_r", 0.3)
+
+            # Detect ball reset (score event) — clear stale context
+            if prev_actual is not None:
+                jump = abs(bx - prev_actual[0]) + abs(by - prev_actual[1])
+                if jump > 0.3:
+                    emb_buffer.clear()
+                    action_buffer.clear()
+                    logger.info("Ball reset detected, cleared context buffers")
 
             # Set renderer state to match client
             renderer.ball_x = bx
@@ -140,7 +148,8 @@ async def pong_endpoint(ws: WebSocket):
                 emb = model.encode(frame_t.to(device))[0, 0]
                 emb_buffer.append(emb)
 
-                # Action: paddle movements (approximated from state)
+                # Zero actions — model trained with normalized actions but we don't
+                # have matched scaling. Zero is safer than mismatched values.
                 action = torch.zeros(1, 2, device=device)
                 action_emb = model.action_encoder(action)[0]
                 action_buffer.append(action_emb)
@@ -162,17 +171,29 @@ async def pong_endpoint(ws: WebSocket):
                     state_norm = probe(pred[0])
                     state = (state_norm[0] * _state_std + _state_mean).cpu().numpy()
                     ghost_x = float(np.clip(state[0], 0, 1))
-                    ghost_y = float(np.clip(state[1], 0, 0.6))
+                    # Probe outputs ball_y normalized to [0,1] but client uses court height CH=0.6
+                    ghost_y = float(np.clip(state[1] * 0.6, 0, 0.6))
 
-            # Accuracy: compare previous ghost prediction to current actual position
+            # Accuracy: compare previous prediction to current actual
+            # Also compute baseline: "predict same position" (no model needed)
             accuracy = None
+            baseline = None
             if prev_ghost is not None and prev_actual is not None:
-                dist = np.sqrt((prev_ghost[0] - bx)**2 + (prev_ghost[1] - by)**2)
-                acc = max(0, (1 - dist / 0.3) * 100)
-                accuracies.append(acc)
+                jepa_dist = np.sqrt((prev_ghost[0] - bx)**2 + (prev_ghost[1] - by)**2)
+                # Baseline: predict ball stays where it was last observed
+                base_dist = np.sqrt((prev_actual[0] - bx)**2 + (prev_actual[1] - by)**2)
+
+                jepa_acc = max(0, (1 - jepa_dist / 0.3) * 100)
+                base_acc = max(0, (1 - base_dist / 0.3) * 100)
+
+                accuracies.append(jepa_acc)
+                baseline_accuracies.append(base_acc)
                 if len(accuracies) > 50:
                     accuracies = accuracies[-50:]
+                if len(baseline_accuracies) > 50:
+                    baseline_accuracies = baseline_accuracies[-50:]
                 accuracy = np.mean(accuracies)
+                baseline = np.mean(baseline_accuracies)
 
             prev_ghost = (ghost_x, ghost_y)
             prev_actual = (bx, by)
@@ -181,12 +202,13 @@ async def pong_endpoint(ws: WebSocket):
                 "ghost_x": round(ghost_x, 4),
                 "ghost_y": round(ghost_y, 4),
                 "accuracy": accuracy,
+                "baseline": baseline,
             }))
 
             frame_count += 1
             if frame_count % 100 == 0:
-                logger.info("Pong: %d frames, acc=%.1f%%",
-                            frame_count, accuracy or 0)
+                logger.info("Pong: %d frames, jepa=%.1f%% baseline=%.1f%%",
+                            frame_count, accuracy or 0, baseline or 0)
 
     except WebSocketDisconnect:
         logger.info("Pong disconnected after %d frames", frame_count)

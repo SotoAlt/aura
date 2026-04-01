@@ -29,8 +29,9 @@ class EDMDiffusion(nn.Module):
         self.sigma_min = cfg.get('sigma_min', 0.002)
         self.sigma_max = cfg.get('sigma_max', 80.0)
         self.sigma_data = cfg.get('sigma_data', 0.5)
+        self.sigma_offset_noise = cfg.get('sigma_offset_noise', 0.0)
         self.rho = cfg.get('rho', 7.0)
-        self.P_mean = cfg.get('P_mean', -1.2)
+        self.P_mean = cfg.get('P_mean', -0.4)
         self.P_std = cfg.get('P_std', 1.2)
 
     # -------------------------------------------------------------------
@@ -67,13 +68,20 @@ class EDMDiffusion(nn.Module):
             (B, 3, H, W) denoised prediction
         """
         sigma_bc = sigma[:, None, None, None]  # broadcast shape
-        c_skip = self.c_skip(sigma_bc)
-        c_out = self.c_out(sigma_bc)
-        c_in = self.c_in(sigma_bc)
 
-        # Scale input and context by c_in
+        # Paper: adjust sigma for offset noise in conditioners
+        if self.sigma_offset_noise > 0:
+            sigma_cond = (sigma_bc ** 2 + self.sigma_offset_noise ** 2).sqrt()
+        else:
+            sigma_cond = sigma_bc
+
+        c_skip = self.c_skip(sigma_cond)
+        c_out = self.c_out(sigma_cond)
+        c_in = self.c_in(sigma_cond)
+
+        # Paper: scale noisy input by c_in, context by 1/sigma_data (different!)
         scaled_x = c_in * x
-        scaled_ctx = c_in * context_frames
+        scaled_ctx = context_frames / self.sigma_data
 
         # Run U-Net with c_noise as the sigma embedding input
         F_theta = self.unet(scaled_x, scaled_ctx, self.c_noise(sigma), audio_cond)
@@ -100,12 +108,16 @@ class EDMDiffusion(nn.Module):
         B = target.shape[0]
         device = target.device
 
-        # Sample sigma from log-normal distribution
+        # Sample sigma from log-normal distribution, clamped to [sigma_min, sigma_max]
         log_sigma = torch.randn(B, device=device) * self.P_std + self.P_mean
-        sigma = log_sigma.exp()
+        sigma = log_sigma.exp().clamp(self.sigma_min, self.sigma_max)
 
-        # Add noise
+        # Add noise (with optional offset noise for brightness consistency)
         noise = torch.randn_like(target)
+        offset_noise_std = self.cfg.get('sigma_offset_noise', 0.0)
+        if offset_noise_std > 0:
+            # Offset noise: add a per-channel, spatially-constant offset
+            noise = noise + offset_noise_std * torch.randn(B, 3, 1, 1, device=device)
         noisy = target + sigma[:, None, None, None] * noise
 
         # Predict clean image
@@ -145,8 +157,10 @@ class EDMDiffusion(nn.Module):
         device = context_frames.device
 
         # Build sigma schedule (EDM: geometric spacing in sigma^(1/rho))
+        # Use inference sigma_max (lower than training sigma_max per DIAMOND paper)
         rho = self.rho
-        sigma_max_inv = self.sigma_max ** (1 / rho)
+        sigma_max_sample = self.cfg.get('sigma_max_inference', self.sigma_max)
+        sigma_max_inv = sigma_max_sample ** (1 / rho)
         sigma_min_inv = self.sigma_min ** (1 / rho)
         steps = torch.linspace(0, 1, num_steps + 1, device=device)
         sigmas = (sigma_max_inv + steps * (sigma_min_inv - sigma_max_inv)) ** rho

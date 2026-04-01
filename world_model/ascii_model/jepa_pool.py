@@ -405,14 +405,23 @@ if __name__ == "__main__":
     s_std = windows_s.std(0).clamp(min=1e-6)
 
     model.eval()
-    print("Encoding frames for probe training...")
+    print("Encoding predicted latents for probe training (predict_next, not encode)...")
     all_emb = []
     with torch.no_grad():
         for i in range(0, len(windows_f), bs):
-            batch = windows_f[i:i+bs].to(device)
-            emb = model.encode(batch)[:, -1]
-            all_emb.append(emb.cpu())
+            batch_f = windows_f[i:i+bs].to(device)
+            batch_a = windows_a[i:i+bs].to(device)
+            # Encode all frames, use context to predict next latent
+            emb = model.encode(batch_f)
+            ctx = emb[:, :HISTORY_SIZE]
+            B_b = batch_a.shape[0]
+            a_flat = batch_a[:, :HISTORY_SIZE].reshape(B_b * HISTORY_SIZE, -1)
+            ctx_a = model.action_encoder(a_flat).reshape(B_b, HISTORY_SIZE, -1)
+            # Probe trains on predict_next output — same distribution as inference
+            pred = model.predict_next(ctx, ctx_a)
+            all_emb.append(pred.cpu())
     all_emb = torch.cat(all_emb)
+    # Target states: the LAST frame's state (what we're predicting)
     states_n = (windows_s - s_mean) / s_std
 
     best_val = float('inf')

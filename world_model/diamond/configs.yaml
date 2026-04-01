@@ -68,3 +68,30 @@ aura_abstract_128:
   ar_start_step: 15000
   ar_fraction: 0.5
   ar_rollout_len: 4
+
+aura_diamond_v2:
+  # Paper-matched config (eloialonso/diamond verified values)
+  # 64x64, flat channels, no attention, correct sigma schedule
+  image_size: 64
+  channels: [64, 64, 64, 64]
+  num_res_blocks: 2
+  attention_at: []           # NO attention (paper uses attn_depths=[0,0,0,0])
+  context_frames: 4
+  cond_dim: 16
+  denoising_steps: 3
+  batch_size: 32
+  lr: 1.0e-4                 # paper: 1e-4
+  weight_decay: 1.0e-2       # paper: 1e-2
+  grad_clip: 1.0
+  ema_decay: 0.0             # paper: no EMA
+  sigma_min: 0.002
+  sigma_max: 20.0            # paper training: 20 (NOT 80)
+  sigma_max_inference: 5.0   # paper inference: 5.0
+  sigma_offset_noise: 0.3    # paper: 0.3 (brightness consistency)
+  sigma_data: 0.5
+  rho: 7.0
+  P_mean: -0.4              # paper: loc=-0.4 (NOT -1.2)
+  P_std: 1.2                # paper: scale=1.2
+  ar_start_step: 15000
+  ar_fraction: 0.5
+  ar_rollout_len: 4
