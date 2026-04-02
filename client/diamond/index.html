@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AURA — DIAMOND World Model</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void: #020304;
+    --flesh: #8a3a2a;
+    --bone: #c4a882;
+    --nerve: #4ae68a;
+    --nerve-dim: #1a5a32;
+    --vein: rgba(74,230,138,0.06);
+    --membrane: rgba(196,168,130,0.08);
+    --scan: rgba(74,230,138,0.03);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; }
+  body {
+    background: var(--void);
+    font-family: 'Share Tech Mono', monospace;
+    color: var(--bone);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background-image:
+      repeating-linear-gradient(0deg, var(--scan) 0px, var(--scan) 1px, transparent 1px, transparent 4px),
+      radial-gradient(ellipse at 50% 60%, rgba(138,58,42,0.06) 0%, transparent 70%);
+  }
+
+  .shell { width: min(96vw, 720px); display:flex; flex-direction:column; gap:8px; }
+
+  .brand-row { display:flex; justify-content:space-between; align-items:flex-end; padding:0 2px; }
+  .brand {
+    font-family:'Orbitron',sans-serif; font-weight:900; font-size:1.3em;
+    color: var(--nerve); letter-spacing:0.18em;
+    text-shadow: 0 0 30px rgba(74,230,138,0.15), 0 0 60px rgba(74,230,138,0.05);
+  }
+  .brand small { display:block; font-weight:400; font-size:0.35em; color:var(--nerve-dim); letter-spacing:0.3em; margin-top:2px; }
+  .stats { text-align:right; font-size:0.52em; line-height:1.7; color:rgba(196,168,130,0.4); letter-spacing:0.06em; }
+  .stats .v { color:var(--nerve-dim); }
+
+  .viewport {
+    position:relative; border-radius:2px; overflow:hidden;
+    border: 1px solid rgba(74,230,138,0.08);
+    box-shadow: 0 0 40px rgba(74,230,138,0.03), inset 0 0 80px rgba(0,0,0,0.5);
+    background: #030405;
+  }
+  .viewport::after {
+    content:''; position:absolute; inset:0; pointer-events:none;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.04) 0px, rgba(0,0,0,0.04) 1px, transparent 1px, transparent 3px);
+    mix-blend-mode:multiply; opacity:0.6;
+  }
+  canvas#frame { display:block; width:100%; image-rendering:pixelated; cursor:crosshair; }
+
+  .meter-row { display:flex; gap:6px; padding:0 2px; }
+  .meter { flex:1; height:18px; background:rgba(74,230,138,0.03); border:1px solid rgba(74,230,138,0.06); border-radius:1px; position:relative; overflow:hidden; }
+  .meter-fill { position:absolute; left:0; top:0; bottom:0; transition: width 0.08s; }
+  .meter-fill.bass { background: linear-gradient(90deg, var(--flesh), #c45a3a); }
+  .meter-fill.mid { background: linear-gradient(90deg, #3a6a8a, #4a9ac4); }
+  .meter-fill.high { background: linear-gradient(90deg, var(--nerve-dim), var(--nerve)); }
+  .meter-fill.rms { background: linear-gradient(90deg, rgba(196,168,130,0.3), var(--bone)); }
+  .meter-label { position:absolute; top:2px; left:5px; font-size:0.42em; color:rgba(196,168,130,0.3); letter-spacing:0.1em; text-transform:uppercase; z-index:1; }
+
+  .foot { display:flex; justify-content:center; padding:4px; font-size:0.42em; color:rgba(196,168,130,0.2); letter-spacing:0.08em; }
+
+  .overlay {
+    position:fixed; inset:0; background:rgba(2,3,4,0.98);
+    display:flex; align-items:center; justify-content:center;
+    z-index:100; cursor:pointer;
+  }
+  .ov-box { text-align:center; max-width:400px; }
+  .ov-box h2 {
+    font-family:'Orbitron',sans-serif; font-weight:900; font-size:2.4em;
+    color:var(--nerve); letter-spacing:0.2em;
+    text-shadow: 0 0 60px rgba(74,230,138,0.2);
+    margin-bottom:0.1em;
+  }
+  .ov-box .sub { font-size:0.6em; color:var(--nerve-dim); letter-spacing:0.3em; margin-bottom:2em; }
+  .ov-box p { font-size:0.65em; line-height:2; color:rgba(196,168,130,0.35); margin-bottom:2em; }
+  .ov-box p em { font-style:normal; color:var(--nerve); }
+  .go {
+    display:inline-block; border:1px solid var(--nerve-dim); color:var(--nerve);
+    padding:10px 36px; font-family:'Orbitron',sans-serif; font-weight:700;
+    font-size:0.7em; letter-spacing:0.25em; text-transform:uppercase; transition:all 0.3s;
+  }
+  .go:hover { background:var(--nerve); color:var(--void); box-shadow:0 0 30px rgba(74,230,138,0.2); }
+</style>
+</head>
+<body>
+<div class="overlay" id="overlay">
+  <div class="ov-box">
+    <h2>AURA</h2>
+    <div class="sub">DIAMOND World Model</div>
+    <p>Audio-reactive corridor generation.<br>Your <em>microphone</em> drives the world.<br>Speak, clap, play music — watch it react.<br><br>29M diffusion U-Net · 3 denoising steps · 64×64</p>
+    <div class="go" id="startBtn">Enter the Corridor</div>
+  </div>
+</div>
+
+<div class="shell">
+  <div class="brand-row">
+    <div class="brand">AURA<small>DIAMOND World Model</small></div>
+    <div class="stats">
+      gen <span class="v" id="s-ms">—</span> ms<br>
+      fps <span class="v" id="s-fps">—</span><br>
+      frames <span class="v" id="s-frames">0</span>
+    </div>
+  </div>
+  <div class="viewport"><canvas id="frame" width="64" height="64"></canvas></div>
+  <div class="meter-row">
+    <div class="meter"><div class="meter-fill bass" id="m-bass" style="width:0%"></div><span class="meter-label">bass</span></div>
+    <div class="meter"><div class="meter-fill mid" id="m-mid" style="width:0%"></div><span class="meter-label">mid</span></div>
+    <div class="meter"><div class="meter-fill high" id="m-high" style="width:0%"></div><span class="meter-label">high</span></div>
+    <div class="meter"><div class="meter-fill rms" id="m-rms" style="width:0%"></div><span class="meter-label">rms</span></div>
+  </div>
+  <div class="foot">microphone → fft → diamond diffusion → corridor</div>
+</div>
+
+<script>
+const canvas = document.getElementById('frame');
+const ctx2d = canvas.getContext('2d');
+let ws = null, audioCtx = null, analyser = null, fftData = null;
+let sending = false;
+
+function extractAudio() {
+  if (!analyser || !fftData) return new Float32Array(16);
+  analyser.getByteFrequencyData(fftData);
+  const n = fftData.length;
+  const a = new Float32Array(16);
+  // Sub-bass (0-1): bins 0-3
+  a[0] = (fftData[0]+fftData[1]+fftData[2]+fftData[3]) / (4*255);
+  a[1] = a[0] * 0.8;
+  // Mid (2-3): bins 8-30
+  let mid=0; for(let i=8;i<30;i++) mid+=fftData[i]; a[2]=mid/((30-8)*255); a[3]=a[2]*0.9;
+  // High (4-5): bins 40-80
+  let hi=0; for(let i=40;i<Math.min(80,n);i++) hi+=fftData[i]; a[4]=hi/(40*255); a[5]=a[4]*0.8;
+  // Onset (6-7)
+  a[6] = a[0] > 0.4 ? 1 : 0; a[7] = a[6]*0.5;
+  // BPM placeholder (8-9)
+  a[8] = 0.5; a[9] = 0.5;
+  // Spectral centroid (10-11)
+  let wsum=0,sum=0; for(let i=0;i<n;i++){wsum+=i*fftData[i];sum+=fftData[i];}
+  a[10] = sum>0 ? (wsum/sum)/n : 0.5; a[11] = a[10];
+  // RMS (12-13)
+  let rms=0; for(let i=0;i<n;i++) rms+=fftData[i]*fftData[i]; rms=Math.sqrt(rms/n)/255;
+  a[12] = rms; a[13] = rms;
+  // Update meters
+  document.getElementById('m-bass').style.width = (a[0]*100)+'%';
+  document.getElementById('m-mid').style.width = (a[2]*100)+'%';
+  document.getElementById('m-high').style.width = (a[4]*100)+'%';
+  document.getElementById('m-rms').style.width = (rms*100)+'%';
+  return a;
+}
+
+function connectWS() {
+  ws = new WebSocket('ws://localhost:8770/ws-diamond');
+  ws.onopen = () => { sending = false; sendFrame(); };
+  ws.onclose = () => setTimeout(connectWS, 2000);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.frame) {
+      const img = new Image();
+      img.onload = () => { ctx2d.drawImage(img, 0, 0, 64, 64); sending = false; sendFrame(); };
+      img.src = 'data:image/png;base64,' + msg.frame;
+    }
+    if (msg.gen_ms !== undefined) document.getElementById('s-ms').textContent = msg.gen_ms;
+    if (msg.fps !== undefined) document.getElementById('s-fps').textContent = msg.fps;
+    if (msg.frame_count !== undefined) document.getElementById('s-frames').textContent = msg.frame_count;
+  };
+}
+
+function sendFrame() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || sending) return;
+  sending = true;
+  const audio = Array.from(extractAudio());
+  ws.send(JSON.stringify({ audio }));
+}
+
+async function start() {
+  const ov = document.getElementById('overlay');
+  ov.style.opacity='0'; ov.style.transition='opacity 0.6s';
+  setTimeout(() => ov.remove(), 600);
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    fftData = new Uint8Array(analyser.frequencyBinCount);
+  } catch(e) { console.warn('No mic:', e); }
+  connectWS();
+}
+
+document.getElementById('startBtn').addEventListener('click', start);
+</script>
+</body>
+</html>

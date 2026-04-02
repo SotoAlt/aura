@@ -1,10 +1,9 @@
 """Collect Pong training data as HDF5 for stable-worldmodel LeWM training.
 
-Generates episodes with AI-controlled paddles, saves in the HDF5 format
-expected by stable_worldmodel.data.dataset.HDF5Dataset.
+Writes directly to HDF5 in chunks — no RAM accumulation.
 
 Usage:
-    python scripts/collect_pong_data.py --episodes 1000 --steps 100 --output pong_train
+    python scripts/collect_pong_data.py --episodes 3000 --steps 100 --output pong_train_3k
 """
 
 import argparse
@@ -21,69 +20,52 @@ def collect(n_episodes: int, steps_per_ep: int, frameskip: int, image_size: int,
     env = PongWorld()
     rng = np.random.default_rng(seed)
 
-    all_pixels = []
-    all_actions = []
-    all_states = []
-    ep_lengths = []
+    total_frames = n_episodes * steps_per_ep
 
-    for ep in range(n_episodes):
-        env.reset(seed=seed + ep)
-        noise = rng.uniform(0.0, 0.15)  # varying AI skill
-
-        ep_pixels = []
-        ep_actions = []
-        ep_states = []
-
-        for step in range(steps_per_ep):
-            action = env.ai_action(noise=noise)
-
-            for _ in range(frameskip):
-                env.step(action)
-
-            frame = env.render(image_size)  # (H, W, 3) uint8
-            state = env.get_state()  # (10,) float32
-
-            ep_pixels.append(frame)
-            ep_actions.append(np.array(action, dtype=np.float32))
-            ep_states.append(state)
-
-        all_pixels.extend(ep_pixels)
-        all_actions.extend(ep_actions)
-        all_states.extend(ep_states)
-        ep_lengths.append(len(ep_pixels))
-
-        if (ep + 1) % 100 == 0 or ep == 0:
-            print(f"  Episode {ep+1}/{n_episodes} "
-                  f"(noise={noise:.2f}, score={env.score_l}-{env.score_r})")
-
-    pixels = np.array(all_pixels)    # (N, H, W, 3) uint8
-    actions = np.array(all_actions)  # (N, 2) float32
-    states = np.array(all_states)    # (N, 10) float32
-    ep_lens = np.array(ep_lengths, dtype=np.int32)
-    ep_offsets = np.cumsum(np.concatenate([[0], ep_lens[:-1]])).astype(np.int64)
-    ep_idx = np.concatenate([np.full(l, i, dtype=np.int32) for i, l in enumerate(ep_lens)])
-
-    # Save as HDF5 in stable-worldmodel format
     datasets_dir = os.environ.get("STABLEWM_HOME", os.path.expanduser("~/.stable_worldmodel"))
     datasets_dir = os.path.join(datasets_dir, "datasets")
     os.makedirs(datasets_dir, exist_ok=True)
     h5_path = os.path.join(datasets_dir, f"{output_name}.h5")
 
-    print(f"\nSaving to {h5_path}")
-    print(f"  pixels: {pixels.shape} ({pixels.nbytes / 1e9:.1f} GB)")
-    print(f"  actions: {actions.shape}")
-    print(f"  states: {states.shape}")
-    print(f"  episodes: {len(ep_lens)}")
+    print(f"Writing {n_episodes} episodes x {steps_per_ep} steps to {h5_path}")
+    print(f"  Pre-allocating {total_frames} frames at {image_size}x{image_size}")
 
     with h5py.File(h5_path, "w") as f:
-        f.create_dataset("pixels", data=pixels, chunks=(1, image_size, image_size, 3))
-        f.create_dataset("action", data=actions)
-        f.create_dataset("state", data=states)
-        f.create_dataset("ep_len", data=ep_lens)
-        f.create_dataset("ep_offset", data=ep_offsets)
-        f.create_dataset("ep_idx", data=ep_idx)
+        # Pre-allocate datasets
+        px = f.create_dataset("pixels", shape=(total_frames, image_size, image_size, 3),
+                              dtype=np.uint8, chunks=(1, image_size, image_size, 3))
+        act = f.create_dataset("action", shape=(total_frames, 2), dtype=np.float32)
+        st = f.create_dataset("state", shape=(total_frames, 10), dtype=np.float32)
+        ep_len = f.create_dataset("ep_len", shape=(n_episodes,), dtype=np.int32)
+        ep_offset = f.create_dataset("ep_offset", shape=(n_episodes,), dtype=np.int64)
+        ep_idx_ds = f.create_dataset("ep_idx", shape=(total_frames,), dtype=np.int32)
 
-    print(f"Saved {output_name} ({os.path.getsize(h5_path) / 1e6:.0f} MB)")
+        idx = 0
+        for ep in range(n_episodes):
+            env.reset(seed=seed + ep)
+            noise = rng.uniform(0.0, 0.15)
+            ep_start = idx
+
+            for step in range(steps_per_ep):
+                action = env.ai_action(noise=noise)
+                for _ in range(frameskip):
+                    env.step(action)
+
+                px[idx] = env.render(image_size)
+                act[idx] = np.array(action, dtype=np.float32)
+                st[idx] = env.get_state()
+                ep_idx_ds[idx] = ep
+                idx += 1
+
+            ep_len[ep] = steps_per_ep
+            ep_offset[ep] = ep_start
+
+            if (ep + 1) % 100 == 0 or ep == 0:
+                print(f"  Episode {ep+1}/{n_episodes} "
+                      f"(noise={noise:.2f}, score={env.score_l}-{env.score_r})")
+
+    size_mb = os.path.getsize(h5_path) / 1e6
+    print(f"Saved {output_name}: {total_frames} frames, {size_mb:.0f} MB")
     return h5_path
 
 
